@@ -35,8 +35,10 @@ class CommandLineTests(unittest.TestCase):
             "Цены:",
             "Целевая сумма:",
             "Скрытый вектор:",
+            "NGA режим:",
             "Лучшее решение:",
             "Fitness:",
+            "NGA использован:",
             "Причина остановки:",
         ):
             self.assertIn(label, completed.stdout)

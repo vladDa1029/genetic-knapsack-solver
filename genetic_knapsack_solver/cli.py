@@ -12,6 +12,12 @@ from genetic_knapsack_solver.generator import (
 )
 from genetic_knapsack_solver.models import GeneticAlgorithmConfig
 
+NGA_MODE_LABELS = {
+    "none": "Без NGA",
+    "two_point": "NGA: двухточечный кроссовер и двухточечная мутация",
+    "elite_heavy_mutation": "NGA: сохранить лучшую особь и сильно мутировать остальные",
+}
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -43,6 +49,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Порог поколений без улучшения.",
     )
     parser.add_argument(
+        "--repeat-limit",
+        type=int,
+        default=None,
+        help="Лимит поколений без улучшения для одноразового вызова NGA.",
+    )
+    parser.add_argument(
         "--crossover-rate",
         type=float,
         default=0.8,
@@ -59,6 +71,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Размер турнира при селекции.",
+    )
+    parser.add_argument(
+        "--nga-mode",
+        choices=tuple(NGA_MODE_LABELS),
+        default="none",
+        help="Режим одноразового вмешательства NGA.",
+    )
+    parser.add_argument(
+        "--nga-mutation-fraction",
+        type=float,
+        default=0.4,
+        help="Доля битов для сильной мутации в режиме elite_heavy_mutation.",
     )
     parser.add_argument(
         "--seed",
@@ -87,9 +111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         population_size=args.population_size,
         generations=args.generations,
         stagnation=args.stagnation,
+        repeat_limit=args.repeat_limit,
         crossover_rate=args.crossover_rate,
         mutation_rate=args.mutation_rate,
         tournament_size=args.tournament_size,
+        nga_mode=args.nga_mode,
+        nga_mutation_fraction=args.nga_mutation_fraction,
     )
     result = solve_with_genetic_algorithm(
         prices=problem.prices,
@@ -103,11 +130,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Цены: {problem.prices}")
     print(f"Целевая сумма: {problem.target_sum}")
     print(f"Скрытый вектор: {_format_vector(problem.hidden_vector)}")
+    print(f"NGA режим: {NGA_MODE_LABELS[config.nga_mode]}")
+    print(f"Лимит NGA без улучшения: {config.repeat_limit if config.repeat_limit is not None else 'Не используется'}")
     print(f"Лучшее решение: {_format_vector(result.best_vector)}")
     print(f"Найденная сумма: {result.best_sum}")
     print(f"Fitness: {result.fitness}")
     print(f"Абсолютная разница: {result.difference}")
     print(f"Поколений: {result.generations_used}")
     print(f"Точное совпадение: {'Да' if result.exact_match else 'Нет'}")
+    print(f"NGA использован: {'Да' if result.nga_used else 'Нет'}")
+    print(f"Поколение NGA: {result.nga_trigger_generation if result.nga_trigger_generation is not None else 'Не применялся'}")
     print(f"Причина остановки: {result.stop_reason}")
     return 0

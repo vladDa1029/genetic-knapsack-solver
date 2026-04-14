@@ -3,8 +3,11 @@ from genetic_knapsack_solver.cli import main
 from genetic_knapsack_solver.ga import (
     build_initial_population,
     crossover,
+    crossover_two_points,
     fitness,
     mutate,
+    mutate_many_bits,
+    mutate_two_points,
     solve_with_genetic_algorithm,
 )
 from genetic_knapsack_solver.generator import (
@@ -26,11 +29,14 @@ __all__ = [
     "build_initial_population",
     "count_target_solutions",
     "crossover",
+    "crossover_two_points",
     "dot_product",
     "fitness",
     "generate_problem",
     "main",
     "mutate",
+    "mutate_many_bits",
+    "mutate_two_points",
     "run_benchmark",
     "solve_with_genetic_algorithm",
 ]

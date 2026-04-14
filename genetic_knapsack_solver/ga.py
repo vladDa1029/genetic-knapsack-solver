@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from random import Random
+from typing import Callable
 
 from genetic_knapsack_solver.generator import dot_product
 from genetic_knapsack_solver.models import GeneticAlgorithmConfig, GeneticAlgorithmResult
@@ -15,6 +17,8 @@ class _RunResult:
     generations_used: int
     stop_reason: str
     exact_match: bool
+    nga_used: bool
+    nga_trigger_generation: int | None
 
 
 def evaluate_vector(
@@ -70,10 +74,53 @@ def crossover(
     return child_a, child_b
 
 
+def crossover_two_points(
+    first: list[int],
+    second: list[int],
+    rng: Random,
+) -> tuple[list[int], list[int]]:
+    if len(first) < 3:
+        return crossover(first, second, rng)
+
+    left, right = sorted(rng.sample(range(1, len(first)), 2))
+    child_a = first[:left] + second[left:right] + first[right:]
+    child_b = second[:left] + first[left:right] + second[right:]
+    return child_a, child_b
+
+
 def mutate(vector: list[int], mutation_rate: float, rng: Random) -> list[int]:
     mutated = vector[:]
     if mutated and rng.random() < mutation_rate:
         index = rng.randrange(len(mutated))
+        mutated[index] = 1 - mutated[index]
+    return mutated
+
+
+def mutate_two_points(vector: list[int], mutation_rate: float, rng: Random) -> list[int]:
+    mutated = vector[:]
+    if not mutated or rng.random() >= mutation_rate:
+        return mutated
+
+    if len(mutated) == 1:
+        mutated[0] = 1 - mutated[0]
+        return mutated
+
+    for index in rng.sample(range(len(mutated)), 2):
+        mutated[index] = 1 - mutated[index]
+    return mutated
+
+
+def mutate_many_bits(
+    vector: list[int],
+    mutation_fraction: float,
+    rng: Random,
+) -> list[int]:
+    mutated = vector[:]
+    if not mutated or mutation_fraction <= 0.0:
+        return mutated
+
+    flip_count = min(len(mutated), max(1, ceil(len(mutated) * mutation_fraction)))
+    for index in rng.sample(range(len(mutated)), flip_count):
         mutated[index] = 1 - mutated[index]
     return mutated
 
@@ -98,16 +145,22 @@ def _pick_parent(
     return population[best_index]
 
 
-def _next_population(
+def _rank_population_indices(evaluations: list[tuple[int, int]]) -> list[int]:
+    return sorted(
+        range(len(evaluations)),
+        key=lambda index: evaluations[index][0],
+    )
+
+
+def _build_next_population(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
     config: GeneticAlgorithmConfig,
     rng: Random,
+    crossover_fn: Callable[[list[int], list[int], Random], tuple[list[int], list[int]]],
+    mutate_fn: Callable[[list[int], float, Random], list[int]],
 ) -> list[list[int]]:
-    ranked_indices = sorted(
-        range(len(population)),
-        key=lambda index: evaluations[index][0],
-    )
+    ranked_indices = _rank_population_indices(evaluations)
     next_generation = [population[ranked_indices[0]][:]]
 
     while len(next_generation) < len(population):
@@ -125,15 +178,62 @@ def _next_population(
         )
 
         if rng.random() < config.crossover_rate:
-            child_a, child_b = crossover(parent_a, parent_b, rng)
+            child_a, child_b = crossover_fn(parent_a, parent_b, rng)
         else:
             child_a, child_b = parent_a[:], parent_b[:]
 
-        next_generation.append(mutate(child_a, config.mutation_rate, rng))
+        next_generation.append(mutate_fn(child_a, config.mutation_rate, rng))
         if len(next_generation) < len(population):
-            next_generation.append(mutate(child_b, config.mutation_rate, rng))
+            next_generation.append(mutate_fn(child_b, config.mutation_rate, rng))
 
     return next_generation
+
+
+def _apply_nga_two_point(
+    population: list[list[int]],
+    evaluations: list[tuple[int, int]],
+    config: GeneticAlgorithmConfig,
+    rng: Random,
+) -> list[list[int]]:
+    return _build_next_population(
+        population,
+        evaluations,
+        config,
+        rng,
+        crossover_two_points,
+        mutate_two_points,
+    )
+
+
+def _apply_nga_elite_heavy_mutation(
+    population: list[list[int]],
+    evaluations: list[tuple[int, int]],
+    config: GeneticAlgorithmConfig,
+    rng: Random,
+) -> list[list[int]]:
+    ranked_indices = _rank_population_indices(evaluations)
+    best_index = ranked_indices[0]
+    next_generation = [population[best_index][:]]
+
+    for index, vector in enumerate(population):
+        if index == best_index:
+            continue
+        next_generation.append(mutate_many_bits(vector, config.nga_mutation_fraction, rng))
+
+    return next_generation
+
+
+def _apply_nga_intervention(
+    population: list[list[int]],
+    evaluations: list[tuple[int, int]],
+    config: GeneticAlgorithmConfig,
+    rng: Random,
+) -> list[list[int]]:
+    if config.nga_mode == "two_point":
+        return _apply_nga_two_point(population, evaluations, config, rng)
+    if config.nga_mode == "elite_heavy_mutation":
+        return _apply_nga_elite_heavy_mutation(population, evaluations, config, rng)
+    return population
 
 
 def _best_from_population(
@@ -163,17 +263,23 @@ def _run_search(
             generations_used=0,
             stop_reason="exact_match",
             exact_match=True,
+            nga_used=False,
+            nga_trigger_generation=None,
         )
 
-    stagnation = 0
+    no_improvement_streak = 0
     current_population = population
+    nga_used = False
+    nga_trigger_generation: int | None = None
 
     for generation in range(1, config.generations + 1):
-        current_population = _next_population(
+        current_population = _build_next_population(
             current_population,
             evaluations,
             config,
             rng,
+            crossover,
+            mutate,
         )
         evaluations = _evaluate_population(current_population, prices, target_sum)
         current_best_vector, current_best_sum, current_best_difference = _best_from_population(
@@ -185,9 +291,9 @@ def _run_search(
             best_vector = current_best_vector
             best_sum = current_best_sum
             best_difference = current_best_difference
-            stagnation = 0
+            no_improvement_streak = 0
         else:
-            stagnation += 1
+            no_improvement_streak += 1
 
         if best_difference == 0:
             return _RunResult(
@@ -197,9 +303,52 @@ def _run_search(
                 generations_used=generation,
                 stop_reason="exact_match",
                 exact_match=True,
+                nga_used=nga_used,
+                nga_trigger_generation=nga_trigger_generation,
             )
 
-        if stagnation >= config.stagnation:
+        if (
+            config.nga_mode != "none"
+            and not nga_used
+            and config.repeat_limit is not None
+            and no_improvement_streak >= config.repeat_limit
+        ):
+            current_population = _apply_nga_intervention(
+                current_population,
+                evaluations,
+                config,
+                rng,
+            )
+            evaluations = _evaluate_population(current_population, prices, target_sum)
+            current_best_vector, current_best_sum, current_best_difference = _best_from_population(
+                current_population,
+                evaluations,
+            )
+            nga_used = True
+            nga_trigger_generation = generation
+
+            if current_best_difference < best_difference:
+                best_vector = current_best_vector
+                best_sum = current_best_sum
+                best_difference = current_best_difference
+
+            no_improvement_streak = 0
+
+            if best_difference == 0:
+                return _RunResult(
+                    best_vector=best_vector,
+                    best_sum=best_sum,
+                    best_difference=best_difference,
+                    generations_used=generation,
+                    stop_reason="exact_match",
+                    exact_match=True,
+                    nga_used=nga_used,
+                    nga_trigger_generation=nga_trigger_generation,
+                )
+
+            continue
+
+        if no_improvement_streak >= config.stagnation:
             return _RunResult(
                 best_vector=best_vector,
                 best_sum=best_sum,
@@ -207,6 +356,8 @@ def _run_search(
                 generations_used=generation,
                 stop_reason="stagnation",
                 exact_match=False,
+                nga_used=nga_used,
+                nga_trigger_generation=nga_trigger_generation,
             )
 
     return _RunResult(
@@ -216,6 +367,8 @@ def _run_search(
         generations_used=config.generations,
         stop_reason="generation_limit",
         exact_match=False,
+        nga_used=nga_used,
+        nga_trigger_generation=nga_trigger_generation,
     )
 
 
@@ -245,4 +398,6 @@ def solve_with_genetic_algorithm(
         generations_used=run.generations_used,
         exact_match=run.exact_match,
         stop_reason=run.stop_reason,
+        nga_used=run.nga_used,
+        nga_trigger_generation=run.nga_trigger_generation,
     )
