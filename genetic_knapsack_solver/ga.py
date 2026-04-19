@@ -152,9 +152,23 @@ def _rank_population_indices(evaluations: list[tuple[int, int]]) -> list[int]:
     )
 
 
+def _select_survivors(
+    candidates: list[list[int]],
+    prices: list[int],
+    target_sum: int,
+) -> list[list[int]]:
+    ranked_candidates = sorted(
+        enumerate(candidates),
+        key=lambda item: (evaluate_vector(prices, target_sum, item[1])[0], item[0]),
+    )
+    return [candidates[index][:] for index, _ in ranked_candidates[:2]]
+
+
 def _build_next_population(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
+    prices: list[int],
+    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
     crossover_fn: Callable[[list[int], list[int], Random], tuple[list[int], list[int]]],
@@ -182,9 +196,17 @@ def _build_next_population(
         else:
             child_a, child_b = parent_a[:], parent_b[:]
 
-        next_generation.append(mutate_fn(child_a, config.mutation_rate, rng))
-        if len(next_generation) < len(population):
-            next_generation.append(mutate_fn(child_b, config.mutation_rate, rng))
+        candidate_pool = [
+            parent_a[:],
+            parent_b[:],
+            mutate_fn(child_a, config.mutation_rate, rng),
+            mutate_fn(child_b, config.mutation_rate, rng),
+        ]
+        survivors = _select_survivors(candidate_pool, prices, target_sum)
+        for survivor in survivors:
+            if len(next_generation) >= len(population):
+                break
+            next_generation.append(survivor)
 
     return next_generation
 
@@ -192,12 +214,16 @@ def _build_next_population(
 def _apply_nga_two_point(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
+    prices: list[int],
+    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> list[list[int]]:
     return _build_next_population(
         population,
         evaluations,
+        prices,
+        target_sum,
         config,
         rng,
         crossover_two_points,
@@ -226,11 +252,13 @@ def _apply_nga_elite_heavy_mutation(
 def _apply_nga_intervention(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
+    prices: list[int],
+    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> list[list[int]]:
     if config.nga_mode == "two_point":
-        return _apply_nga_two_point(population, evaluations, config, rng)
+        return _apply_nga_two_point(population, evaluations, prices, target_sum, config, rng)
     if config.nga_mode == "elite_heavy_mutation":
         return _apply_nga_elite_heavy_mutation(population, evaluations, config, rng)
     return population
@@ -276,6 +304,8 @@ def _run_search(
         current_population = _build_next_population(
             current_population,
             evaluations,
+            prices,
+            target_sum,
             config,
             rng,
             crossover,
@@ -316,6 +346,8 @@ def _run_search(
             current_population = _apply_nga_intervention(
                 current_population,
                 evaluations,
+                prices,
+                target_sum,
                 config,
                 rng,
             )

@@ -4,6 +4,7 @@ import unittest
 from random import Random
 
 from genetic_knapsack_solver.ga import (
+    _select_survivors,
     crossover,
     crossover_two_points,
     fitness,
@@ -34,6 +35,20 @@ class GeneticAlgorithmTests(unittest.TestCase):
         self.assertEqual(sum(mutated), 1)
         self.assertEqual(sum(mutated_two_points), 2)
         self.assertEqual(sum(mutated_many_bits), 4)
+
+    def test_local_selection_chooses_best_two_from_parents_and_children(self) -> None:
+        survivors = _select_survivors(
+            candidates=[
+                [1, 0, 0],  # sum=10, diff=1
+                [0, 1, 0],  # sum=20, diff=9
+                [0, 0, 1],  # sum=30, diff=19
+                [1, 1, 0],  # sum=30, diff=19
+            ],
+            prices=[10, 20, 30],
+            target_sum=11,
+        )
+
+        self.assertEqual(survivors, [[1, 0, 0], [0, 1, 0]])
 
     def test_solver_stops_on_stagnation_without_nga(self) -> None:
         config = GeneticAlgorithmConfig(

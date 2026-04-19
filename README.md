@@ -49,10 +49,56 @@ uv run --python pypy3.11 python main.py --items 12 --generation-mode random --po
 uv run --python pypy3.11 python benchmark.py
 ```
 
+Как указывать параметры:
+- `--items 25,26`
+  список размеров задачи `n` через запятую;
+- `--repeats 33`
+  число независимых задач на каждую конфигурацию;
+- `--generation-mode superincreasing_disguised`
+  режим генерации задач, доступно: `random`, `superincreasing_disguised`;
+- `--generations 500000`
+  максимум поколений на один прогон;
+- `--mutation-rate 0.9`
+  вероятность обычной мутации базового ГА;
+- `--crossover-rate 0.95`
+  вероятность обычного кроссовера базового ГА;
+- `--tournament-size 3`
+  размер турнира при селекции;
+- `--population-stop-pairs 500:500,1000:1000,2000:2000`
+  пары в формате `размер_популяции:лимит_без_улучшения`;
+- `--algorithm-modes none,two_point,elite_heavy_mutation`
+  список режимов алгоритма через запятую;
+- `--nga-mutation-fraction 0.4`
+  доля битов для сильной мутации в режиме `elite_heavy_mutation`;
+- `--seed 42`
+  базовый seed для воспроизводимости;
+- `--output-dir benchmark_results\my_run`
+  явный каталог для результатов;
+- `--resume`
+  продолжить уже начатый benchmark из каталога `--output-dir`.
+
+Доступные режимы алгоритма:
+- `none` — базовый ГА без NGA;
+- `two_point` — один раз включается `NGA-1` с двухточечным кроссовером и двухточечной мутацией;
+- `elite_heavy_mutation` — один раз включается `NGA-2` с сохранением лучшей особи и сильной мутацией остальных.
+
 Пример с явными параметрами:
 
 ```powershell
 uv run --python pypy3.11 python benchmark.py --repeats 33 --items 25,26 --generation-mode superincreasing_disguised --generations 500000 --mutation-rate 0.9 --crossover-rate 0.95 --population-stop-pairs 500:500,1000:1000,2000:2000,3000:3000,5000:5000 --algorithm-modes none,two_point,elite_heavy_mutation
+```
+
+Примеры запуска:
+
+```powershell
+# Быстрый короткий smoke benchmark
+uv run --python pypy3.11 python benchmark.py --repeats 1 --items 6 --generations 20 --population-stop-pairs 10:3 --algorithm-modes none,two_point
+
+# Полный benchmark из текущей матрицы
+uv run --python pypy3.11 python benchmark.py --repeats 33 --items 25,26 --generation-mode superincreasing_disguised --generations 500000 --mutation-rate 0.9 --crossover-rate 0.95 --population-stop-pairs 500:500,1000:1000,2000:2000,3000:3000,5000:5000 --algorithm-modes none,two_point,elite_heavy_mutation --output-dir benchmark_results\nga_matrix_n25_26_r33
+
+# Продолжить прерванный прогон
+uv run --python pypy3.11 python benchmark.py --resume --output-dir benchmark_results\nga_matrix_n25_26_r33
 ```
 
 После запуска создаётся папка `benchmark_results/YYYY-MM-DD_HH-MM-SS_mmmmmm`, внутри:
