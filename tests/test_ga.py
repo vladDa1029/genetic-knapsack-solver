@@ -4,7 +4,6 @@ import unittest
 from random import Random
 
 from genetic_knapsack_solver.ga import (
-    _select_survivors,
     crossover,
     crossover_two_points,
     fitness,
@@ -36,20 +35,6 @@ class GeneticAlgorithmTests(unittest.TestCase):
         self.assertEqual(sum(mutated_two_points), 2)
         self.assertEqual(sum(mutated_many_bits), 4)
 
-    def test_local_selection_chooses_best_two_from_parents_and_children(self) -> None:
-        survivors = _select_survivors(
-            candidates=[
-                [1, 0, 0],  # sum=10, diff=1
-                [0, 1, 0],  # sum=20, diff=9
-                [0, 0, 1],  # sum=30, diff=19
-                [1, 1, 0],  # sum=30, diff=19
-            ],
-            prices=[10, 20, 30],
-            target_sum=11,
-        )
-
-        self.assertEqual(survivors, [[1, 0, 0], [0, 1, 0]])
-
     def test_solver_stops_on_stagnation_without_nga(self) -> None:
         config = GeneticAlgorithmConfig(
             population_size=6,
@@ -71,6 +56,9 @@ class GeneticAlgorithmTests(unittest.TestCase):
         self.assertEqual(result.generations_used, 2)
         self.assertFalse(result.nga_used)
         self.assertIsNone(result.nga_trigger_generation)
+        self.assertEqual(result.nga_trigger_generations, [])
+        self.assertEqual(result.restart_count, 0)
+        self.assertFalse(result.rescue_used)
 
     def test_solver_triggers_two_point_nga_once(self) -> None:
         config = GeneticAlgorithmConfig(
@@ -92,9 +80,12 @@ class GeneticAlgorithmTests(unittest.TestCase):
 
         self.assertFalse(result.exact_match)
         self.assertEqual(result.stop_reason, "stagnation")
-        self.assertEqual(result.generations_used, 3)
+        self.assertEqual(result.generations_used, 2)
         self.assertTrue(result.nga_used)
         self.assertEqual(result.nga_trigger_generation, 1)
+        self.assertEqual(result.nga_trigger_generations, [1])
+        self.assertEqual(result.restart_count, 0)
+        self.assertFalse(result.rescue_used)
 
     def test_solver_triggers_elite_heavy_mutation_nga_once(self) -> None:
         config = GeneticAlgorithmConfig(
@@ -117,9 +108,104 @@ class GeneticAlgorithmTests(unittest.TestCase):
 
         self.assertFalse(result.exact_match)
         self.assertEqual(result.stop_reason, "stagnation")
-        self.assertEqual(result.generations_used, 3)
+        self.assertEqual(result.generations_used, 2)
         self.assertTrue(result.nga_used)
         self.assertEqual(result.nga_trigger_generation, 1)
+        self.assertEqual(result.nga_trigger_generations, [1])
+        self.assertEqual(result.restart_count, 0)
+        self.assertFalse(result.rescue_used)
+
+    def test_staged_hypermutation_triggers_only_on_exact_points(self) -> None:
+        config = GeneticAlgorithmConfig(
+            population_size=6,
+            generations=6,
+            stagnation=4,
+            crossover_rate=0.0,
+            mutation_rate=0.0,
+            tournament_size=2,
+            nga_mode="staged_hypermutation",
+            nga_trigger_points=(1, 3),
+            nga_mutate_points=(40,),
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[4, 8],
+            target_sum=3,
+            config=config,
+            rng=Random(7),
+        )
+
+        self.assertFalse(result.exact_match)
+        self.assertEqual(result.stop_reason, "stagnation")
+        self.assertEqual(result.generations_used, 4)
+        self.assertTrue(result.nga_used)
+        self.assertEqual(result.nga_trigger_generation, 1)
+        self.assertEqual(result.nga_trigger_generations, [1, 3])
+        self.assertEqual(result.restart_count, 0)
+        self.assertFalse(result.rescue_used)
+
+    def test_restart_rescue_stops_by_restart_limit(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="restart_rescue",
+            population_size=6,
+            generations=5,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=0.0,
+            tournament_size=2,
+            restart_max_count=0,
+            rescue_min_mutated_bits_ratio=0.4,
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[4, 8],
+            target_sum=3,
+            config=config,
+            rng=Random(7),
+        )
+
+        self.assertFalse(result.exact_match)
+        self.assertEqual(result.stop_reason, "restart_limit")
+        self.assertEqual(result.restart_count, 0)
+        self.assertFalse(result.rescue_used)
+        self.assertFalse(result.nga_used)
+        self.assertEqual(result.nga_trigger_generations, [])
+
+    def test_restart_rescue_runs_rescue_once_and_returns_global_best_on_stagnation(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="restart_rescue",
+            population_size=6,
+            generations=5,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=0.0,
+            tournament_size=2,
+            restart_max_count=5,
+            rescue_min_mutated_bits_ratio=0.4,
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[4, 8],
+            target_sum=3,
+            config=config,
+            rng=Random(7),
+        )
+
+        self.assertFalse(result.exact_match)
+        self.assertEqual(result.stop_reason, "rescue_stagnation")
+        self.assertEqual(result.restart_count, 1)
+        self.assertTrue(result.rescue_used)
+        self.assertFalse(result.nga_used)
+        self.assertEqual(result.difference, 1)
+        self.assertEqual(result.nga_trigger_generations, [])
+
+    def test_staged_hypermutation_requires_valid_points(self) -> None:
+        with self.assertRaises(ValueError):
+            GeneticAlgorithmConfig(
+                population_size=10,
+                generations=10,
+                stagnation=5,
+                nga_mode="staged_hypermutation",
+                nga_trigger_points=(5,),
+                nga_mutate_points=(40,),
+            )
 
 
 if __name__ == "__main__":

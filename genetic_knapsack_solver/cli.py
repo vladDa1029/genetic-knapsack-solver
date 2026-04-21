@@ -12,11 +12,24 @@ from genetic_knapsack_solver.generator import (
 )
 from genetic_knapsack_solver.models import GeneticAlgorithmConfig
 
+SOLVER_MODE_LABELS = {
+    "classic": "Классический режим",
+    "restart_rescue": "Режим рестартов и rescue",
+}
+
 NGA_MODE_LABELS = {
     "none": "Без NGA",
     "two_point": "NGA: двухточечный кроссовер и двухточечная мутация",
     "elite_heavy_mutation": "NGA: сохранить лучшую особь и сильно мутировать остальные",
+    "staged_hypermutation": "NGA: многошаговая hypermutation в точках стагнации",
 }
+
+
+def _parse_int_list(raw: str) -> tuple[int, ...]:
+    values = tuple(int(part.strip()) for part in raw.split(",") if part.strip())
+    if not values:
+        raise argparse.ArgumentTypeError("expected at least one integer")
+    return values
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -29,6 +42,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=tuple(GENERATION_MODE_LABELS),
         default=GENERATION_MODE_RANDOM,
         help="Режим генерации задачи.",
+    )
+    parser.add_argument(
+        "--solver-mode",
+        choices=tuple(SOLVER_MODE_LABELS),
+        default="classic",
+        help="Режим работы solver.",
     )
     parser.add_argument(
         "--population-size",
@@ -76,13 +95,37 @@ def _build_parser() -> argparse.ArgumentParser:
         "--nga-mode",
         choices=tuple(NGA_MODE_LABELS),
         default="none",
-        help="Режим одноразового вмешательства NGA.",
+        help="Режим вмешательства NGA.",
     )
     parser.add_argument(
         "--nga-mutation-fraction",
         type=float,
         default=0.4,
         help="Доля битов для сильной мутации в режиме elite_heavy_mutation.",
+    )
+    parser.add_argument(
+        "--nga-trigger-points",
+        type=_parse_int_list,
+        default=(),
+        help="Точные точки стагнации для staged_hypermutation, например 100,160,215.",
+    )
+    parser.add_argument(
+        "--nga-mutate-points",
+        type=_parse_int_list,
+        default=(40,),
+        help="Проценты сильной мутации для staged_hypermutation: одно значение или список по trigger-point.",
+    )
+    parser.add_argument(
+        "--restart-max-count",
+        type=int,
+        default=None,
+        help="Максимум полных рестартов в режиме restart_rescue.",
+    )
+    parser.add_argument(
+        "--rescue-min-mutated-bits-ratio",
+        type=float,
+        default=0.4,
+        help="Минимальная доля инвертируемых битов в rescue-этапе.",
     )
     parser.add_argument(
         "--seed",
@@ -108,6 +151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         generation_mode=args.generation_mode,
     )
     config = GeneticAlgorithmConfig(
+        solver_mode=args.solver_mode,
         population_size=args.population_size,
         generations=args.generations,
         stagnation=args.stagnation,
@@ -117,6 +161,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         tournament_size=args.tournament_size,
         nga_mode=args.nga_mode,
         nga_mutation_fraction=args.nga_mutation_fraction,
+        nga_trigger_points=args.nga_trigger_points,
+        nga_mutate_points=args.nga_mutate_points,
+        restart_max_count=args.restart_max_count,
+        rescue_min_mutated_bits_ratio=args.rescue_min_mutated_bits_ratio,
     )
     result = solve_with_genetic_algorithm(
         prices=problem.prices,
@@ -130,8 +178,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Цены: {problem.prices}")
     print(f"Целевая сумма: {problem.target_sum}")
     print(f"Скрытый вектор: {_format_vector(problem.hidden_vector)}")
+    print(f"Режим solver: {SOLVER_MODE_LABELS[config.solver_mode]}")
     print(f"NGA режим: {NGA_MODE_LABELS[config.nga_mode]}")
-    print(f"Лимит NGA без улучшения: {config.repeat_limit if config.repeat_limit is not None else 'Не используется'}")
+    print(
+        "Лимит NGA без улучшения: "
+        f"{config.repeat_limit if config.repeat_limit is not None else 'Не используется'}"
+    )
+    print(
+        "Точки staged NGA: "
+        f"{list(config.nga_trigger_points) if config.nga_trigger_points else 'Не используются'}"
+    )
+    print(f"Сила staged NGA, %: {list(config.nga_mutate_points)}")
+    print(
+        "Максимум рестартов: "
+        f"{config.restart_max_count if config.restart_max_count is not None else 'Без ограничения'}"
+    )
+    print(f"Минимальная доля битов rescue: {config.rescue_min_mutated_bits_ratio}")
     print(f"Лучшее решение: {_format_vector(result.best_vector)}")
     print(f"Найденная сумма: {result.best_sum}")
     print(f"Fitness: {result.fitness}")
@@ -139,6 +201,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Поколений: {result.generations_used}")
     print(f"Точное совпадение: {'Да' if result.exact_match else 'Нет'}")
     print(f"NGA использован: {'Да' if result.nga_used else 'Нет'}")
-    print(f"Поколение NGA: {result.nga_trigger_generation if result.nga_trigger_generation is not None else 'Не применялся'}")
+    print(
+        "Поколения NGA: "
+        f"{result.nga_trigger_generations if result.nga_trigger_generations else 'Не применялся'}"
+    )
+    print(f"Количество рестартов: {result.restart_count}")
+    print(f"Rescue использован: {'Да' if result.rescue_used else 'Нет'}")
     print(f"Причина остановки: {result.stop_reason}")
     return 0

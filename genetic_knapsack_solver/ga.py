@@ -10,15 +10,18 @@ from genetic_knapsack_solver.models import GeneticAlgorithmConfig, GeneticAlgori
 
 
 @dataclass(slots=True)
-class _RunResult:
+class _SingleRunResult:
+    population: list[list[int]]
     best_vector: list[int]
     best_sum: int
-    best_difference: int
+    difference: int
+    best_fitness: int
     generations_used: int
-    stop_reason: str
     exact_match: bool
+    stop_reason: str
     nga_used: bool
     nga_trigger_generation: int | None
+    nga_trigger_generations: list[int]
 
 
 def evaluate_vector(
@@ -125,6 +128,21 @@ def mutate_many_bits(
     return mutated
 
 
+def rescue_heavy_mutation(
+    vector: list[int],
+    mutation_ratio: float,
+    rng: Random,
+) -> list[int]:
+    mutated = vector[:]
+    if not mutated or mutation_ratio <= 0.0:
+        return mutated
+
+    flip_count = min(len(mutated), max(1, ceil(mutation_ratio * len(mutated))))
+    for index in rng.sample(range(len(mutated)), flip_count):
+        mutated[index] = 1 - mutated[index]
+    return mutated
+
+
 def _evaluate_population(
     population: list[list[int]],
     prices: list[int],
@@ -152,23 +170,9 @@ def _rank_population_indices(evaluations: list[tuple[int, int]]) -> list[int]:
     )
 
 
-def _select_survivors(
-    candidates: list[list[int]],
-    prices: list[int],
-    target_sum: int,
-) -> list[list[int]]:
-    ranked_candidates = sorted(
-        enumerate(candidates),
-        key=lambda item: (evaluate_vector(prices, target_sum, item[1])[0], item[0]),
-    )
-    return [candidates[index][:] for index, _ in ranked_candidates[:2]]
-
-
 def _build_next_population(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
-    prices: list[int],
-    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
     crossover_fn: Callable[[list[int], list[int], Random], tuple[list[int], list[int]]],
@@ -196,17 +200,9 @@ def _build_next_population(
         else:
             child_a, child_b = parent_a[:], parent_b[:]
 
-        candidate_pool = [
-            parent_a[:],
-            parent_b[:],
-            mutate_fn(child_a, config.mutation_rate, rng),
-            mutate_fn(child_b, config.mutation_rate, rng),
-        ]
-        survivors = _select_survivors(candidate_pool, prices, target_sum)
-        for survivor in survivors:
-            if len(next_generation) >= len(population):
-                break
-            next_generation.append(survivor)
+        next_generation.append(mutate_fn(child_a, config.mutation_rate, rng))
+        if len(next_generation) < len(population):
+            next_generation.append(mutate_fn(child_b, config.mutation_rate, rng))
 
     return next_generation
 
@@ -214,16 +210,12 @@ def _build_next_population(
 def _apply_nga_two_point(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
-    prices: list[int],
-    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> list[list[int]]:
     return _build_next_population(
         population,
         evaluations,
-        prices,
-        target_sum,
         config,
         rng,
         crossover_two_points,
@@ -252,16 +244,42 @@ def _apply_nga_elite_heavy_mutation(
 def _apply_nga_intervention(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
-    prices: list[int],
-    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> list[list[int]]:
     if config.nga_mode == "two_point":
-        return _apply_nga_two_point(population, evaluations, prices, target_sum, config, rng)
+        return _apply_nga_two_point(population, evaluations, config, rng)
     if config.nga_mode == "elite_heavy_mutation":
         return _apply_nga_elite_heavy_mutation(population, evaluations, config, rng)
     return population
+
+
+def _resolve_staged_mutation_fraction(
+    config: GeneticAlgorithmConfig,
+    stagnation_counter: int,
+) -> float:
+    trigger_index = config.nga_trigger_points.index(stagnation_counter)
+    raw_points = config.nga_mutate_points
+    mutate_percent = raw_points[0] if len(raw_points) == 1 else raw_points[trigger_index]
+    return mutate_percent / 100.0
+
+
+def _apply_staged_hypermutation(
+    population: list[list[int]],
+    evaluations: list[tuple[int, int]],
+    mutation_fraction: float,
+    rng: Random,
+) -> list[list[int]]:
+    ranked_indices = _rank_population_indices(evaluations)
+    best_index = ranked_indices[0]
+    next_generation = [population[best_index][:]]
+
+    for index, vector in enumerate(population):
+        if index == best_index:
+            continue
+        next_generation.append(mutate_many_bits(vector, mutation_fraction, rng))
+
+    return next_generation
 
 
 def _best_from_population(
@@ -273,39 +291,52 @@ def _best_from_population(
     return population[best_index][:], best_sum, best_difference
 
 
-def _run_search(
-    population: list[list[int]],
+def _copy_population(population: list[list[int]]) -> list[list[int]]:
+    return [vector[:] for vector in population]
+
+
+def _single_run(
     prices: list[int],
     target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
-) -> _RunResult:
-    evaluations = _evaluate_population(population, prices, target_sum)
-    best_vector, best_sum, best_difference = _best_from_population(population, evaluations)
+    initial_population: list[list[int]] | None = None,
+    stop_on_stagnation: bool = True,
+    allow_nga: bool = False,
+) -> _SingleRunResult:
+    current_population = (
+        build_initial_population(len(prices), config.population_size, rng)
+        if initial_population is None
+        else _copy_population(initial_population)
+    )
+    evaluations = _evaluate_population(current_population, prices, target_sum)
+    best_vector, best_sum, best_difference = _best_from_population(current_population, evaluations)
+    best_fitness = best_difference
+    nga_used = False
+    nga_trigger_generation: int | None = None
+    nga_trigger_generations: list[int] = []
 
     if best_difference == 0:
-        return _RunResult(
+        return _SingleRunResult(
+            population=current_population,
             best_vector=best_vector,
             best_sum=best_sum,
-            best_difference=best_difference,
+            difference=best_difference,
+            best_fitness=best_fitness,
             generations_used=0,
-            stop_reason="exact_match",
             exact_match=True,
+            stop_reason="exact_match",
             nga_used=False,
             nga_trigger_generation=None,
+            nga_trigger_generations=[],
         )
 
     no_improvement_streak = 0
-    current_population = population
-    nga_used = False
-    nga_trigger_generation: int | None = None
 
     for generation in range(1, config.generations + 1):
         current_population = _build_next_population(
             current_population,
             evaluations,
-            prices,
-            target_sum,
             config,
             rng,
             crossover,
@@ -316,92 +347,313 @@ def _run_search(
             current_population,
             evaluations,
         )
+        current_best_fitness = current_best_difference
 
         if current_best_difference < best_difference:
             best_vector = current_best_vector
             best_sum = current_best_sum
             best_difference = current_best_difference
+            best_fitness = current_best_fitness
             no_improvement_streak = 0
         else:
             no_improvement_streak += 1
 
         if best_difference == 0:
-            return _RunResult(
+            return _SingleRunResult(
+                population=current_population,
                 best_vector=best_vector,
                 best_sum=best_sum,
-                best_difference=best_difference,
+                difference=best_difference,
+                best_fitness=best_fitness,
                 generations_used=generation,
-                stop_reason="exact_match",
                 exact_match=True,
+                stop_reason="exact_match",
                 nga_used=nga_used,
                 nga_trigger_generation=nga_trigger_generation,
+                nga_trigger_generations=nga_trigger_generations[:],
             )
 
-        if (
-            config.nga_mode != "none"
-            and not nga_used
-            and config.repeat_limit is not None
-            and no_improvement_streak >= config.repeat_limit
-        ):
-            current_population = _apply_nga_intervention(
-                current_population,
-                evaluations,
-                prices,
-                target_sum,
-                config,
-                rng,
-            )
-            evaluations = _evaluate_population(current_population, prices, target_sum)
-            current_best_vector, current_best_sum, current_best_difference = _best_from_population(
-                current_population,
-                evaluations,
-            )
-            nga_used = True
-            nga_trigger_generation = generation
+        if allow_nga and config.nga_mode != "none":
+            nga_population: list[list[int]] | None = None
 
-            if current_best_difference < best_difference:
-                best_vector = current_best_vector
-                best_sum = current_best_sum
-                best_difference = current_best_difference
-
-            no_improvement_streak = 0
-
-            if best_difference == 0:
-                return _RunResult(
-                    best_vector=best_vector,
-                    best_sum=best_sum,
-                    best_difference=best_difference,
-                    generations_used=generation,
-                    stop_reason="exact_match",
-                    exact_match=True,
-                    nga_used=nga_used,
-                    nga_trigger_generation=nga_trigger_generation,
+            if (
+                config.nga_mode == "staged_hypermutation"
+                and no_improvement_streak in config.nga_trigger_points
+            ):
+                mutation_fraction = _resolve_staged_mutation_fraction(config, no_improvement_streak)
+                nga_population = _apply_staged_hypermutation(
+                    current_population,
+                    evaluations,
+                    mutation_fraction,
+                    rng,
+                )
+            elif (
+                config.nga_mode in ("two_point", "elite_heavy_mutation")
+                and not nga_used
+                and config.repeat_limit is not None
+                and no_improvement_streak >= config.repeat_limit
+            ):
+                nga_population = _apply_nga_intervention(
+                    current_population,
+                    evaluations,
+                    config,
+                    rng,
                 )
 
-            continue
+            if nga_population is not None:
+                current_population = nga_population
+                evaluations = _evaluate_population(current_population, prices, target_sum)
+                current_best_vector, current_best_sum, current_best_difference = _best_from_population(
+                    current_population,
+                    evaluations,
+                )
+                current_best_fitness = current_best_difference
+                nga_used = True
+                if nga_trigger_generation is None:
+                    nga_trigger_generation = generation
+                nga_trigger_generations.append(generation)
 
-        if no_improvement_streak >= config.stagnation:
-            return _RunResult(
+                if current_best_difference < best_difference:
+                    best_vector = current_best_vector
+                    best_sum = current_best_sum
+                    best_difference = current_best_difference
+                    best_fitness = current_best_fitness
+                    no_improvement_streak = 0
+
+                if best_difference == 0:
+                    return _SingleRunResult(
+                        population=current_population,
+                        best_vector=best_vector,
+                        best_sum=best_sum,
+                        difference=best_difference,
+                        best_fitness=best_fitness,
+                        generations_used=generation,
+                        exact_match=True,
+                        stop_reason="exact_match",
+                        nga_used=nga_used,
+                        nga_trigger_generation=nga_trigger_generation,
+                        nga_trigger_generations=nga_trigger_generations[:],
+                    )
+
+        if stop_on_stagnation and no_improvement_streak >= config.stagnation:
+            return _SingleRunResult(
+                population=current_population,
                 best_vector=best_vector,
                 best_sum=best_sum,
-                best_difference=best_difference,
+                difference=best_difference,
+                best_fitness=best_fitness,
                 generations_used=generation,
-                stop_reason="stagnation",
                 exact_match=False,
+                stop_reason="stagnation_limit",
                 nga_used=nga_used,
                 nga_trigger_generation=nga_trigger_generation,
+                nga_trigger_generations=nga_trigger_generations[:],
             )
 
-    return _RunResult(
+    return _SingleRunResult(
+        population=current_population,
         best_vector=best_vector,
         best_sum=best_sum,
-        best_difference=best_difference,
+        difference=best_difference,
+        best_fitness=best_fitness,
         generations_used=config.generations,
-        stop_reason="generation_limit",
-        exact_match=False,
+        exact_match=best_difference == 0,
+        stop_reason="exact_match" if best_difference == 0 else "generation_limit",
         nga_used=nga_used,
         nga_trigger_generation=nga_trigger_generation,
+        nga_trigger_generations=nga_trigger_generations[:],
     )
+
+
+def _build_rescue_population(
+    base_population: list[list[int]],
+    global_best_vector: list[int],
+    mutation_ratio: float,
+    rng: Random,
+) -> list[list[int]]:
+    rescue_population = [global_best_vector[:]]
+    for vector in base_population[1:]:
+        rescue_population.append(rescue_heavy_mutation(vector, mutation_ratio, rng))
+    return rescue_population
+
+
+def _choose_better_run(
+    first: _SingleRunResult,
+    second: _SingleRunResult,
+) -> _SingleRunResult:
+    if second.difference < first.difference:
+        return second
+    if second.difference > first.difference:
+        return first
+    if second.best_fitness < first.best_fitness:
+        return second
+    return first
+
+
+def _build_result(
+    run: _SingleRunResult,
+    generations_used: int,
+    stop_reason: str,
+    restart_count: int,
+    rescue_used: bool,
+) -> GeneticAlgorithmResult:
+    return GeneticAlgorithmResult(
+        best_vector=run.best_vector,
+        best_sum=run.best_sum,
+        fitness=run.best_fitness,
+        difference=run.difference,
+        generations_used=generations_used,
+        exact_match=run.exact_match,
+        stop_reason=stop_reason,
+        nga_used=run.nga_used,
+        nga_trigger_generation=run.nga_trigger_generation,
+        nga_trigger_generations=run.nga_trigger_generations[:],
+        restart_count=restart_count,
+        rescue_used=rescue_used,
+    )
+
+
+def _solve_classic(
+    prices: list[int],
+    target_sum: int,
+    config: GeneticAlgorithmConfig,
+    rng: Random,
+) -> GeneticAlgorithmResult:
+    run = _single_run(
+        prices=prices,
+        target_sum=target_sum,
+        config=config,
+        rng=rng,
+        initial_population=None,
+        stop_on_stagnation=True,
+        allow_nga=True,
+    )
+    stop_reason = "stagnation" if run.stop_reason == "stagnation_limit" else run.stop_reason
+    return _build_result(
+        run=run,
+        generations_used=run.generations_used,
+        stop_reason=stop_reason,
+        restart_count=0,
+        rescue_used=False,
+    )
+
+
+def _solve_restart_rescue(
+    prices: list[int],
+    target_sum: int,
+    config: GeneticAlgorithmConfig,
+    rng: Random,
+) -> GeneticAlgorithmResult:
+    run_0 = _single_run(
+        prices=prices,
+        target_sum=target_sum,
+        config=config,
+        rng=rng,
+        initial_population=None,
+        stop_on_stagnation=True,
+        allow_nga=False,
+    )
+
+    if run_0.stop_reason in {"exact_match", "generation_limit"}:
+        return _build_result(
+            run=run_0,
+            generations_used=run_0.generations_used,
+            stop_reason=run_0.stop_reason,
+            restart_count=0,
+            rescue_used=False,
+        )
+
+    global_best = run_0
+    total_generations = run_0.generations_used
+    restart_count = 0
+
+    while True:
+        if config.restart_max_count is not None and restart_count >= config.restart_max_count:
+            return _build_result(
+                run=global_best,
+                generations_used=total_generations,
+                stop_reason="restart_limit",
+                restart_count=restart_count,
+                rescue_used=False,
+            )
+
+        restart_count += 1
+        run_i = _single_run(
+            prices=prices,
+            target_sum=target_sum,
+            config=config,
+            rng=rng,
+            initial_population=None,
+            stop_on_stagnation=True,
+            allow_nga=False,
+        )
+        total_generations += run_i.generations_used
+
+        if run_i.stop_reason in {"exact_match", "generation_limit"}:
+            return _build_result(
+                run=run_i,
+                generations_used=total_generations,
+                stop_reason=run_i.stop_reason,
+                restart_count=restart_count,
+                rescue_used=False,
+            )
+
+        if run_i.difference < global_best.difference:
+            global_best = run_i
+            continue
+
+        rescue_population = _build_rescue_population(
+            base_population=run_i.population,
+            global_best_vector=global_best.best_vector,
+            mutation_ratio=config.rescue_min_mutated_bits_ratio,
+            rng=rng,
+        )
+        rescue_run = _single_run(
+            prices=prices,
+            target_sum=target_sum,
+            config=config,
+            rng=rng,
+            initial_population=rescue_population,
+            stop_on_stagnation=True,
+            allow_nga=False,
+        )
+        total_generations += rescue_run.generations_used
+
+        if rescue_run.stop_reason == "exact_match":
+            return _build_result(
+                run=rescue_run,
+                generations_used=total_generations,
+                stop_reason="exact_match",
+                restart_count=restart_count,
+                rescue_used=True,
+            )
+
+        if rescue_run.stop_reason == "stagnation_limit":
+            return _build_result(
+                run=global_best,
+                generations_used=total_generations,
+                stop_reason="rescue_stagnation",
+                restart_count=restart_count,
+                rescue_used=True,
+            )
+
+        if rescue_run.stop_reason == "generation_limit":
+            selected_run = _choose_better_run(global_best, rescue_run)
+            return _build_result(
+                run=selected_run,
+                generations_used=total_generations,
+                stop_reason="rescue_generation_limit",
+                restart_count=restart_count,
+                rescue_used=True,
+            )
+
+        return _build_result(
+            run=rescue_run,
+            generations_used=total_generations,
+            stop_reason=rescue_run.stop_reason,
+            restart_count=restart_count,
+            rescue_used=True,
+        )
 
 
 def solve_with_genetic_algorithm(
@@ -410,26 +662,16 @@ def solve_with_genetic_algorithm(
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> GeneticAlgorithmResult:
-    population = build_initial_population(
-        gene_count=len(prices),
-        population_size=config.population_size,
-        rng=rng,
-    )
-    run = _run_search(
-        population=population,
+    if config.solver_mode == "restart_rescue":
+        return _solve_restart_rescue(
+            prices=prices,
+            target_sum=target_sum,
+            config=config,
+            rng=rng,
+        )
+    return _solve_classic(
         prices=prices,
         target_sum=target_sum,
         config=config,
         rng=rng,
-    )
-    return GeneticAlgorithmResult(
-        best_vector=run.best_vector,
-        best_sum=run.best_sum,
-        fitness=run.best_difference,
-        difference=run.best_difference,
-        generations_used=run.generations_used,
-        exact_match=run.exact_match,
-        stop_reason=run.stop_reason,
-        nga_used=run.nga_used,
-        nga_trigger_generation=run.nga_trigger_generation,
     )

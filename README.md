@@ -118,6 +118,11 @@ uv run --python pypy3.11 python benchmark.py --resume --output-dir benchmark_res
 uv run --python pypy3.11 python -m unittest discover -s tests
 ```
 
+## Дополнительная документация
+
+- Текущие реализованные режимы проекта: [docs/current_project_modes.md](/D:/Users/vladD/Work/genetic-knapsack-solver/docs/current_project_modes.md)
+- ТЗ на планируемый режим многошагового `NGA`: [docs/planned_staged_hypermutation_nga.md](/D:/Users/vladD/Work/genetic-knapsack-solver/docs/planned_staged_hypermutation_nga.md)
+
 ## Что выводит программа
 
 - режим генерации;

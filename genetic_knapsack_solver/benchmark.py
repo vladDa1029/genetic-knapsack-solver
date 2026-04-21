@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from random import Random
@@ -23,6 +23,7 @@ ALGORITHM_MODE_LABELS: dict[NgaMode, str] = {
     "none": "Без NGA",
     "two_point": "NGA-1: двухточечный кроссовер и двухточечная мутация",
     "elite_heavy_mutation": "NGA-2: сохранить лучшую особь и сильно мутировать остальные",
+    "staged_hypermutation": "NGA-3: staged hypermutation в точках стагнации",
 }
 
 STOP_REASON_LABELS = {
@@ -46,6 +47,8 @@ CSV_FIELD_LABELS = {
     "crossover_rate": "Вероятность кроссовера",
     "tournament_size": "Размер турнира",
     "nga_mutation_fraction": "Доля сильной мутации NGA",
+    "nga_trigger_points": "Точки staged NGA",
+    "nga_mutate_points": "Сила staged NGA (%)",
     "target_sum": "Целевая сумма",
     "hidden_vector": "Скрытый вектор",
     "best_vector": "Лучший вектор",
@@ -56,6 +59,7 @@ CSV_FIELD_LABELS = {
     "exact_match": "Точное совпадение",
     "nga_used": "NGA использован",
     "nga_trigger_generation": "Поколение NGA",
+    "nga_trigger_generations": "Поколения NGA",
     "stop_reason": "Причина остановки",
     "elapsed_seconds": "Время выполнения (сек)",
     "status": "Статус",
@@ -84,6 +88,8 @@ class BenchmarkSettings:
         "elite_heavy_mutation",
     )
     nga_mutation_fraction: float = 0.4
+    nga_trigger_points: tuple[int, ...] = ()
+    nga_mutate_points: tuple[int, ...] = (40,)
     generation_mode: str = GENERATION_MODE_SUPERINCREASING_DISGUISED
     seed: int = 42
     output_root: Path = Path("benchmark_results")
@@ -105,21 +111,24 @@ class BenchmarkRecord:
     crossover_rate: float
     tournament_size: int
     nga_mutation_fraction: float
-    problem_seed: int
-    solver_seed: int
-    target_sum: int | None
-    hidden_vector: str | None
-    best_vector: str | None
-    best_sum: int | None
-    fitness: int | None
-    difference: int | None
-    generations_used: int | None
-    exact_match: bool | None
-    nga_used: bool | None
-    nga_trigger_generation: int | None
-    stop_reason: str
-    elapsed_seconds: float | None
-    status: str
+    nga_trigger_points: str = "[]"
+    nga_mutate_points: str = "[40]"
+    problem_seed: int = 0
+    solver_seed: int = 0
+    target_sum: int | None = None
+    hidden_vector: str | None = None
+    best_vector: str | None = None
+    best_sum: int | None = None
+    fitness: int | None = None
+    difference: int | None = None
+    generations_used: int | None = None
+    exact_match: bool | None = None
+    nga_used: bool | None = None
+    nga_trigger_generation: int | None = None
+    nga_trigger_generations: str | None = None
+    stop_reason: str = "failed"
+    elapsed_seconds: float | None = None
+    status: str = "failed"
     reason: str = ""
 
 
@@ -138,9 +147,7 @@ def _parse_population_stop_pairs(raw: str) -> tuple[tuple[int, int], ...]:
             continue
         population_size_raw, separator, stop_limit_raw = candidate.partition(":")
         if separator != ":":
-            raise argparse.ArgumentTypeError(
-                "expected pairs in format population:stop_limit"
-            )
+            raise argparse.ArgumentTypeError("expected pairs in format population:stop_limit")
         population_size = int(population_size_raw.strip())
         stop_limit = int(stop_limit_raw.strip())
         pairs.append((population_size, stop_limit))
@@ -157,15 +164,13 @@ def _parse_algorithm_modes(raw: str) -> tuple[NgaMode, ...]:
 
     invalid_modes = [mode for mode in modes if mode not in ALGORITHM_MODE_LABELS]
     if invalid_modes:
-        raise argparse.ArgumentTypeError(
-            f"unknown algorithm modes: {', '.join(invalid_modes)}"
-        )
+        raise argparse.ArgumentTypeError(f"unknown algorithm modes: {', '.join(invalid_modes)}")
     return modes  # type: ignore[return-value]
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Бенчмарк базового ГА и двух NGA-режимов.",
+        description="Бенчмарк базового ГА и доступных NGA-режимов.",
     )
     parser.add_argument(
         "--items",
@@ -230,6 +235,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Доля битов для сильной мутации в режиме elite_heavy_mutation.",
     )
     parser.add_argument(
+        "--nga-trigger-points",
+        type=_parse_int_list,
+        default=(),
+        help="Точные точки стагнации для staged_hypermutation.",
+    )
+    parser.add_argument(
+        "--nga-mutate-points",
+        type=_parse_int_list,
+        default=(40,),
+        help="Проценты сильной мутации для staged_hypermutation.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -257,6 +274,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _format_vector(vector: list[int]) -> str:
     return json.dumps(vector, ensure_ascii=False)
+
+
+def _format_int_tuple(values: tuple[int, ...]) -> str:
+    return json.dumps(list(values), ensure_ascii=False)
 
 
 def _format_stop_reason(stop_reason: str) -> str:
@@ -329,13 +350,8 @@ def _build_problem_cache(settings: BenchmarkSettings) -> dict[tuple[int, int], t
     return problems
 
 
-def _build_record_key(
-    payload: dict[str, Any] | BenchmarkRecord,
-) -> tuple[int, int, str, int, int]:
-    if isinstance(payload, BenchmarkRecord):
-        data = asdict(payload)
-    else:
-        data = payload
+def _build_record_key(payload: dict[str, Any] | BenchmarkRecord) -> tuple[int, int, str, int, int]:
+    data = asdict(payload) if isinstance(payload, BenchmarkRecord) else payload
     return (
         int(data["item_count"]),
         int(data["repeat_index"]),
@@ -351,15 +367,7 @@ def _iter_matrix(settings: BenchmarkSettings) -> list[tuple[int, int, str, int, 
         for repeat_index in range(1, settings.repeats + 1):
             for algorithm_mode in settings.algorithm_modes:
                 for population_size, stop_limit in settings.population_stop_pairs:
-                    matrix.append(
-                        (
-                            item_count,
-                            repeat_index,
-                            algorithm_mode,
-                            population_size,
-                            stop_limit,
-                        )
-                    )
+                    matrix.append((item_count, repeat_index, algorithm_mode, population_size, stop_limit))
     return matrix
 
 
@@ -375,17 +383,30 @@ def _summary_path(output_dir: Path) -> Path:
     return output_dir / "summary.md"
 
 
-def _load_existing_records(output_dir: Path) -> dict[tuple[int, int, str, int, int | None], BenchmarkRecord]:
+def _record_defaults() -> dict[str, Any]:
+    defaults: dict[str, Any] = {}
+    for field_info in fields(BenchmarkRecord):
+        if field_info.default is not MISSING:
+            defaults[field_info.name] = field_info.default
+        elif field_info.default_factory is not MISSING:  # type: ignore[comparison-overlap]
+            defaults[field_info.name] = field_info.default_factory()  # type: ignore[misc]
+    return defaults
+
+
+def _benchmark_record_from_payload(payload: dict[str, Any]) -> BenchmarkRecord:
+    merged = _record_defaults()
+    merged.update(payload)
+    return BenchmarkRecord(**merged)
+
+
+def _load_existing_records(output_dir: Path) -> dict[tuple[int, int, str, int, int], BenchmarkRecord]:
     state_path = _state_path(output_dir)
     if not state_path.exists():
         return {}
 
     payload = json.loads(state_path.read_text(encoding="utf-8"))
     records = payload.get("records", [])
-    return {
-        _build_record_key(record): BenchmarkRecord(**record)
-        for record in records
-    }
+    return {_build_record_key(record): _benchmark_record_from_payload(record) for record in records}
 
 
 def _records_payload(
@@ -414,6 +435,8 @@ def _records_payload(
                 "population_stop_pairs": [list(pair) for pair in settings.population_stop_pairs],
                 "algorithm_modes": list(settings.algorithm_modes),
                 "nga_mutation_fraction": settings.nga_mutation_fraction,
+                "nga_trigger_points": list(settings.nga_trigger_points),
+                "nga_mutate_points": list(settings.nga_mutate_points),
                 "generation_mode": settings.generation_mode,
                 "seed": settings.seed,
                 "resume": settings.resume,
@@ -440,6 +463,8 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "crossover_rate",
         "tournament_size",
         "nga_mutation_fraction",
+        "nga_trigger_points",
+        "nga_mutate_points",
         "target_sum",
         "hidden_vector",
         "best_vector",
@@ -450,6 +475,7 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "exact_match",
         "nga_used",
         "nga_trigger_generation",
+        "nga_trigger_generations",
         "stop_reason",
         "elapsed_seconds",
         "status",
@@ -457,10 +483,7 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
     ]
 
     with _csv_path(output_dir).open("w", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=[CSV_FIELD_LABELS[field] for field in field_order],
-        )
+        writer = csv.DictWriter(file, fieldnames=[CSV_FIELD_LABELS[field] for field in field_order])
         writer.writeheader()
         for record in records:
             row = asdict(record)
@@ -469,32 +492,20 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
             row["exact_match"] = _format_exact_match(row["exact_match"])
             row["nga_used"] = _format_nga_used(row["nga_used"])
             row["stop_reason"] = _format_stop_reason(row["stop_reason"])
-            row["elapsed_seconds"] = (
-                "n/a" if row["elapsed_seconds"] is None else f"{float(row['elapsed_seconds']):.6f}"
-            )
+            row["elapsed_seconds"] = "n/a" if row["elapsed_seconds"] is None else f"{float(row['elapsed_seconds']):.6f}"
             writer.writerow({CSV_FIELD_LABELS[field]: row[field] for field in field_order})
 
 
 def _group_summary(records: list[BenchmarkRecord]) -> list[dict[str, Any]]:
     groups: dict[tuple[int, str, int, int], list[BenchmarkRecord]] = {}
     for record in records:
-        key = (
-            record.item_count,
-            record.algorithm_mode,
-            record.population_size,
-            record.stagnation,
-        )
+        key = (record.item_count, record.algorithm_mode, record.population_size, record.stagnation)
         groups.setdefault(key, []).append(record)
 
     summary_rows: list[dict[str, Any]] = []
     for (item_count, algorithm_mode, population_size, stop_limit), group_records in sorted(
         groups.items(),
-        key=lambda item: (
-            item[0][0],
-            item[0][1],
-            item[0][2],
-            item[0][3],
-        ),
+        key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3]),
     ):
         completed_records = [record for record in group_records if record.status == "completed"]
         exact_matches = sum(1 for record in completed_records if record.exact_match)
@@ -537,9 +548,7 @@ def _write_summary(
 ) -> None:
     summary_rows = _group_summary(records)
     completed_records = [record for record in records if record.status == "completed"]
-    elapsed_seconds = None
-    if finished_at is not None:
-        elapsed_seconds = (finished_at - started_at).total_seconds()
+    elapsed_seconds = None if finished_at is None else (finished_at - started_at).total_seconds()
 
     lines = [
         "# Сводка бенчмарка",
@@ -559,6 +568,8 @@ def _write_summary(
         f"- Размер турнира: `{settings.tournament_size}`",
         f"- Пары population:stop_limit: `{[f'{population}:{stop_limit}' for population, stop_limit in settings.population_stop_pairs]}`",
         f"- Доля сильной мутации NGA: `{settings.nga_mutation_fraction}`",
+        f"- Точки staged NGA: `{list(settings.nga_trigger_points)}`",
+        f"- Сила staged NGA (%): `{list(settings.nga_mutate_points)}`",
         f"- Базовый seed: `{settings.seed}`",
         "",
         "## Сводные результаты",
@@ -573,16 +584,8 @@ def _write_summary(
 
     for row in summary_rows:
         avg_fitness = "n/a" if row["avg_fitness"] is None else f"{row['avg_fitness']:.2f}"
-        avg_generations = (
-            "n/a"
-            if row["avg_generations_used"] is None
-            else f"{row['avg_generations_used']:.2f}"
-        )
-        avg_elapsed = (
-            "n/a"
-            if row["avg_elapsed_seconds"] is None
-            else f"{row['avg_elapsed_seconds']:.6f}"
-        )
+        avg_generations = "n/a" if row["avg_generations_used"] is None else f"{row['avg_generations_used']:.2f}"
+        avg_elapsed = "n/a" if row["avg_elapsed_seconds"] is None else f"{row['avg_elapsed_seconds']:.6f}"
         lines.append(
             "| "
             f"{row['item_count']} | "
@@ -608,24 +611,9 @@ def _persist_results(
     started_at: datetime,
     finished_at: datetime | None,
 ) -> None:
-    ordered_records = [
-        records_by_key[key]
-        for key in sorted(
-            records_by_key,
-            key=lambda item: (
-                item[0],
-                item[1],
-                item[2],
-                item[3],
-                -1 if item[4] is None else item[4],
-            ),
-        )
-    ]
+    ordered_records = [records_by_key[key] for key in sorted(records_by_key)]
     payload = _records_payload(settings, ordered_records, started_at, finished_at)
-    _state_path(output_dir).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _state_path(output_dir).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_csv(output_dir, ordered_records)
     _write_summary(output_dir, settings, ordered_records, started_at, finished_at)
 
@@ -642,14 +630,13 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
     matrix = _iter_matrix(settings)
 
     for item_count, repeat_index, algorithm_mode, population_size, stop_limit in matrix:
-        repeat_limit = stop_limit if algorithm_mode != "none" else None
         record_key = (item_count, repeat_index, algorithm_mode, population_size, stop_limit)
-        if (
-            record_key in records_by_key
-            and records_by_key[record_key].status == "completed"
-        ):
+        if record_key in records_by_key and records_by_key[record_key].status == "completed":
             continue
 
+        repeat_limit = stop_limit if algorithm_mode in {"two_point", "elite_heavy_mutation"} else None
+        nga_trigger_points = settings.nga_trigger_points if algorithm_mode == "staged_hypermutation" else ()
+        nga_mutate_points = settings.nga_mutate_points if algorithm_mode == "staged_hypermutation" else (40,)
         problem_seed, problem = problems[(item_count, repeat_index)]
         solver_seed = _build_solver_seed(
             settings,
@@ -671,6 +658,8 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 tournament_size=settings.tournament_size,
                 nga_mode=algorithm_mode,
                 nga_mutation_fraction=settings.nga_mutation_fraction,
+                nga_trigger_points=nga_trigger_points,
+                nga_mutate_points=nga_mutate_points,
             )
             task_started_at = perf_counter()
             result = solve_with_genetic_algorithm(
@@ -693,6 +682,8 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 crossover_rate=settings.crossover_rate,
                 tournament_size=settings.tournament_size,
                 nga_mutation_fraction=settings.nga_mutation_fraction,
+                nga_trigger_points=_format_int_tuple(nga_trigger_points),
+                nga_mutate_points=_format_int_tuple(nga_mutate_points),
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 target_sum=problem.target_sum,
@@ -705,6 +696,7 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 exact_match=result.exact_match,
                 nga_used=result.nga_used,
                 nga_trigger_generation=result.nga_trigger_generation,
+                nga_trigger_generations=_format_vector(result.nga_trigger_generations),
                 stop_reason=result.stop_reason,
                 elapsed_seconds=task_elapsed_seconds,
                 status="completed",
@@ -723,20 +715,11 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 crossover_rate=settings.crossover_rate,
                 tournament_size=settings.tournament_size,
                 nga_mutation_fraction=settings.nga_mutation_fraction,
+                nga_trigger_points=_format_int_tuple(nga_trigger_points),
+                nga_mutate_points=_format_int_tuple(nga_mutate_points),
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
-                target_sum=None,
-                hidden_vector=None,
-                best_vector=None,
-                best_sum=None,
-                fitness=None,
-                difference=None,
-                generations_used=None,
-                exact_match=None,
-                nga_used=None,
-                nga_trigger_generation=None,
                 stop_reason="failed",
-                elapsed_seconds=None,
                 status="failed",
                 reason=str(error),
             )
@@ -763,6 +746,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         population_stop_pairs=args.population_stop_pairs,
         algorithm_modes=args.algorithm_modes,
         nga_mutation_fraction=args.nga_mutation_fraction,
+        nga_trigger_points=args.nga_trigger_points,
+        nga_mutate_points=args.nga_mutate_points,
         generation_mode=args.generation_mode,
         seed=args.seed,
         output_root=args.output_root,
@@ -773,6 +758,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Результаты бенчмарка сохранены в: {output_dir}")
     print(f"Режим генерации: {GENERATION_MODE_LABELS[settings.generation_mode]}")
     print(f"Режимы алгоритма: {[ALGORITHM_MODE_LABELS[mode] for mode in settings.algorithm_modes]}")
+    print(f"Точки staged NGA: {list(settings.nga_trigger_points)}")
+    print(f"Сила staged NGA (%): {list(settings.nga_mutate_points)}")
     print(f"State-файл: {_state_path(output_dir)}")
     print(f"CSV-файл: {_csv_path(output_dir)}")
     print(f"Markdown-файл: {_summary_path(output_dir)}")

@@ -24,8 +24,8 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_parse_algorithm_modes(self) -> None:
         self.assertEqual(
-            _parse_algorithm_modes("none,two_point,elite_heavy_mutation"),
-            ("none", "two_point", "elite_heavy_mutation"),
+            _parse_algorithm_modes("none,two_point,elite_heavy_mutation,staged_hypermutation"),
+            ("none", "two_point", "elite_heavy_mutation", "staged_hypermutation"),
         )
 
     def test_benchmark_writes_csv_markdown_and_state(self) -> None:
@@ -40,8 +40,10 @@ class BenchmarkTests(unittest.TestCase):
                     crossover_rate=0.6,
                     tournament_size=2,
                     population_stop_pairs=((10, 3),),
-                    algorithm_modes=("none", "two_point"),
+                    algorithm_modes=("none", "staged_hypermutation"),
                     nga_mutation_fraction=0.5,
+                    nga_trigger_points=(1,),
+                    nga_mutate_points=(40,),
                     generation_mode=GENERATION_MODE_SUPERINCREASING_DISGUISED,
                     seed=123,
                     output_dir=output_dir,
@@ -61,13 +63,13 @@ class BenchmarkTests(unittest.TestCase):
 
             self.assertEqual(len(rows), 4)
             self.assertIn("Режим алгоритма", rows[0])
-            self.assertIn("Лимит NGA без улучшения", rows[0])
-            self.assertIn("NGA использован", rows[0])
+            self.assertIn("Точки staged NGA", rows[0])
+            self.assertIn("Поколения NGA", rows[0])
 
             markdown_text = markdown_path.read_text(encoding="utf-8")
             self.assertIn("Режимы алгоритма", markdown_text)
             self.assertIn("Без NGA", markdown_text)
-            self.assertIn("NGA-1: двухточечный кроссовер и двухточечная мутация", markdown_text)
+            self.assertIn("NGA-3: staged hypermutation в точках стагнации", markdown_text)
 
     def test_resume_does_not_duplicate_completed_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -80,7 +82,9 @@ class BenchmarkTests(unittest.TestCase):
                 crossover_rate=0.5,
                 tournament_size=2,
                 population_stop_pairs=((10, 3),),
-                algorithm_modes=("none", "two_point"),
+                algorithm_modes=("none", "staged_hypermutation"),
+                nga_trigger_points=(1,),
+                nga_mutate_points=(40,),
                 generation_mode=GENERATION_MODE_SUPERINCREASING_DISGUISED,
                 seed=321,
                 output_dir=output_dir,
