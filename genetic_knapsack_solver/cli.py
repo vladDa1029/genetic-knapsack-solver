@@ -15,6 +15,7 @@ from genetic_knapsack_solver.models import GeneticAlgorithmConfig
 SOLVER_MODE_LABELS = {
     "classic": "Классический режим",
     "restart_rescue": "Режим рестартов и rescue",
+    "two_stage_restart": "Двухэтапный каскад запусков с переносом элиты",
 }
 
 NGA_MODE_LABELS = {
@@ -22,6 +23,15 @@ NGA_MODE_LABELS = {
     "two_point": "NGA: двухточечный кроссовер и двухточечная мутация",
     "elite_heavy_mutation": "NGA: сохранить лучшую особь и сильно мутировать остальные",
     "staged_hypermutation": "NGA: многошаговая hypermutation в точках стагнации",
+}
+
+RESTART_POPULATION_MODE_LABELS = {
+    "elite_from_last_population": "Элита прошлого запуска + сильная мутация остальных",
+}
+
+OPERATOR_TYPE_LABELS = {
+    "one_point": "Одноточечный",
+    "two_point": "Двухточечный",
 }
 
 
@@ -128,6 +138,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Минимальная доля инвертируемых битов в rescue-этапе.",
     )
     parser.add_argument(
+        "--restart-population-mode",
+        choices=tuple(RESTART_POPULATION_MODE_LABELS),
+        default="elite_from_last_population",
+        help="Способ построения новой популяции между запусками two_stage_restart.",
+    )
+    parser.add_argument(
+        "--restart-mutation-fraction",
+        type=float,
+        default=0.4,
+        help="Доля битов для сильной мутации между запусками two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage2-crossover-type",
+        choices=tuple(OPERATOR_TYPE_LABELS),
+        default="two_point",
+        help="Тип кроссовера для 2 этапа two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage2-mutation-type",
+        choices=tuple(OPERATOR_TYPE_LABELS),
+        default="two_point",
+        help="Тип мутации для 2 этапа two_stage_restart.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -165,6 +199,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         nga_mutate_points=args.nga_mutate_points,
         restart_max_count=args.restart_max_count,
         rescue_min_mutated_bits_ratio=args.rescue_min_mutated_bits_ratio,
+        restart_population_mode=args.restart_population_mode,
+        restart_mutation_fraction=args.restart_mutation_fraction,
+        stage2_crossover_type=args.stage2_crossover_type,
+        stage2_mutation_type=args.stage2_mutation_type,
     )
     result = solve_with_genetic_algorithm(
         prices=problem.prices,
@@ -194,6 +232,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{config.restart_max_count if config.restart_max_count is not None else 'Без ограничения'}"
     )
     print(f"Минимальная доля битов rescue: {config.rescue_min_mutated_bits_ratio}")
+    print(f"Режим restart-популяции: {RESTART_POPULATION_MODE_LABELS[config.restart_population_mode]}")
+    print(f"Сила restart-мутации: {config.restart_mutation_fraction}")
+    print(f"Кроссовер 2 этапа: {OPERATOR_TYPE_LABELS[config.stage2_crossover_type]}")
+    print(f"Мутация 2 этапа: {OPERATOR_TYPE_LABELS[config.stage2_mutation_type]}")
     print(f"Лучшее решение: {_format_vector(result.best_vector)}")
     print(f"Найденная сумма: {result.best_sum}")
     print(f"Fitness: {result.fitness}")
@@ -207,5 +249,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(f"Количество рестартов: {result.restart_count}")
     print(f"Rescue использован: {'Да' if result.rescue_used else 'Нет'}")
+    print(f"Запусков 1 этапа: {result.stage1_run_count}")
+    print(f"Запусков 2 этапа: {result.stage2_run_count}")
+    print(f"2 этап использован: {'Да' if result.stage2_used else 'Нет'}")
+    print(f"История differance 1 этапа: {result.stage1_best_differences}")
+    print(f"История differance 2 этапа: {result.stage2_best_differences}")
     print(f"Причина остановки: {result.stop_reason}")
     return 0

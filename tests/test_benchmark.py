@@ -24,8 +24,8 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_parse_algorithm_modes(self) -> None:
         self.assertEqual(
-            _parse_algorithm_modes("none,two_point,elite_heavy_mutation,staged_hypermutation"),
-            ("none", "two_point", "elite_heavy_mutation", "staged_hypermutation"),
+            _parse_algorithm_modes("none,two_point,elite_heavy_mutation,staged_hypermutation,two_stage_restart"),
+            ("none", "two_point", "elite_heavy_mutation", "staged_hypermutation", "two_stage_restart"),
         )
 
     def test_benchmark_writes_csv_markdown_and_state(self) -> None:
@@ -96,6 +96,41 @@ class BenchmarkTests(unittest.TestCase):
                 rows = list(csv.DictReader(file))
 
             self.assertEqual(len(rows), 2)
+
+    def test_benchmark_supports_two_stage_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "run"
+            result_dir = run_benchmark(
+                BenchmarkSettings(
+                    item_counts=(6,),
+                    repeats=1,
+                    generations=12,
+                    mutation_rate=0.4,
+                    crossover_rate=0.6,
+                    tournament_size=2,
+                    population_stop_pairs=((10, 3),),
+                    algorithm_modes=("two_stage_restart",),
+                    restart_mutation_fraction=0.5,
+                    stage2_crossover_type="two_point",
+                    stage2_mutation_type="two_point",
+                    generation_mode=GENERATION_MODE_SUPERINCREASING_DISGUISED,
+                    seed=777,
+                    output_dir=output_dir,
+                )
+            )
+
+            with (result_dir / "results.csv").open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["Режим алгоритма"], "Two-stage restart: перенос элиты и отдельный 2 этап")
+            self.assertIn("Запусков 1 этапа", rows[0])
+            self.assertIn("Запусков 2 этапа", rows[0])
+            self.assertIn("2 этап использован", rows[0])
+
+            markdown_text = (result_dir / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("Использований 2 этапа", markdown_text)
+            self.assertIn("Two-stage restart: перенос элиты и отдельный 2 этап", markdown_text)
 
 
 if __name__ == "__main__":

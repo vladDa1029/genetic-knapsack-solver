@@ -9,7 +9,7 @@ from pathlib import Path
 from random import Random
 from statistics import mean
 from time import perf_counter
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 from genetic_knapsack_solver.ga import solve_with_genetic_algorithm
 from genetic_knapsack_solver.generator import (
@@ -17,13 +17,28 @@ from genetic_knapsack_solver.generator import (
     GENERATION_MODE_SUPERINCREASING_DISGUISED,
     generate_problem,
 )
-from genetic_knapsack_solver.models import GeneticAlgorithmConfig, NgaMode, ProblemInstance
+from genetic_knapsack_solver.models import (
+    GeneticAlgorithmConfig,
+    NgaMode,
+    OperatorType,
+    ProblemInstance,
+    RestartPopulationMode,
+)
 
-ALGORITHM_MODE_LABELS: dict[NgaMode, str] = {
+BenchmarkMode = Literal[
+    "none",
+    "two_point",
+    "elite_heavy_mutation",
+    "staged_hypermutation",
+    "two_stage_restart",
+]
+
+ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
     "none": "Без NGA",
     "two_point": "NGA-1: двухточечный кроссовер и двухточечная мутация",
     "elite_heavy_mutation": "NGA-2: сохранить лучшую особь и сильно мутировать остальные",
     "staged_hypermutation": "NGA-3: staged hypermutation в точках стагнации",
+    "two_stage_restart": "Two-stage restart: перенос элиты и отдельный 2 этап",
 }
 
 STOP_REASON_LABELS = {
@@ -60,6 +75,15 @@ CSV_FIELD_LABELS = {
     "nga_used": "NGA использован",
     "nga_trigger_generation": "Поколение NGA",
     "nga_trigger_generations": "Поколения NGA",
+    "restart_population_mode": "Режим restart-популяции",
+    "restart_mutation_fraction": "Сила restart-мутации",
+    "stage2_crossover_type": "Кроссовер 2 этапа",
+    "stage2_mutation_type": "Мутация 2 этапа",
+    "stage1_run_count": "Запусков 1 этапа",
+    "stage2_run_count": "Запусков 2 этапа",
+    "stage2_used": "2 этап использован",
+    "stage1_best_differences": "История difference 1 этапа",
+    "stage2_best_differences": "История difference 2 этапа",
     "stop_reason": "Причина остановки",
     "elapsed_seconds": "Время выполнения (сек)",
     "status": "Статус",
@@ -82,7 +106,7 @@ class BenchmarkSettings:
         (3000, 3000),
         (5000, 5000),
     )
-    algorithm_modes: tuple[NgaMode, ...] = (
+    algorithm_modes: tuple[BenchmarkMode, ...] = (
         "none",
         "two_point",
         "elite_heavy_mutation",
@@ -90,6 +114,10 @@ class BenchmarkSettings:
     nga_mutation_fraction: float = 0.4
     nga_trigger_points: tuple[int, ...] = ()
     nga_mutate_points: tuple[int, ...] = (40,)
+    restart_population_mode: RestartPopulationMode = "elite_from_last_population"
+    restart_mutation_fraction: float = 0.4
+    stage2_crossover_type: OperatorType = "two_point"
+    stage2_mutation_type: OperatorType = "two_point"
     generation_mode: str = GENERATION_MODE_SUPERINCREASING_DISGUISED
     seed: int = 42
     output_root: Path = Path("benchmark_results")
@@ -113,6 +141,10 @@ class BenchmarkRecord:
     nga_mutation_fraction: float
     nga_trigger_points: str = "[]"
     nga_mutate_points: str = "[40]"
+    restart_population_mode: str = "elite_from_last_population"
+    restart_mutation_fraction: float = 0.4
+    stage2_crossover_type: str = "two_point"
+    stage2_mutation_type: str = "two_point"
     problem_seed: int = 0
     solver_seed: int = 0
     target_sum: int | None = None
@@ -126,6 +158,11 @@ class BenchmarkRecord:
     nga_used: bool | None = None
     nga_trigger_generation: int | None = None
     nga_trigger_generations: str | None = None
+    stage1_run_count: int | None = None
+    stage2_run_count: int | None = None
+    stage2_used: bool | None = None
+    stage1_best_differences: str | None = None
+    stage2_best_differences: str | None = None
     stop_reason: str = "failed"
     elapsed_seconds: float | None = None
     status: str = "failed"
@@ -157,7 +194,7 @@ def _parse_population_stop_pairs(raw: str) -> tuple[tuple[int, int], ...]:
     return tuple(pairs)
 
 
-def _parse_algorithm_modes(raw: str) -> tuple[NgaMode, ...]:
+def _parse_algorithm_modes(raw: str) -> tuple[BenchmarkMode, ...]:
     modes = tuple(part.strip() for part in raw.split(",") if part.strip())
     if not modes:
         raise argparse.ArgumentTypeError("expected at least one algorithm mode")
@@ -247,6 +284,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Проценты сильной мутации для staged_hypermutation.",
     )
     parser.add_argument(
+        "--restart-population-mode",
+        choices=("elite_from_last_population",),
+        default="elite_from_last_population",
+        help="Способ построения новой популяции для two_stage_restart.",
+    )
+    parser.add_argument(
+        "--restart-mutation-fraction",
+        type=float,
+        default=0.4,
+        help="Доля битов для сильной мутации между запусками two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage2-crossover-type",
+        choices=("one_point", "two_point"),
+        default="two_point",
+        help="Тип кроссовера на 2 этапе two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage2-mutation-type",
+        choices=("one_point", "two_point"),
+        default="two_point",
+        help="Тип мутации на 2 этапе two_stage_restart.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -294,6 +355,12 @@ def _format_nga_used(nga_used: bool | None) -> str:
     if nga_used is None:
         return "n/a"
     return "Да" if nga_used else "Нет"
+
+
+def _format_stage2_used(stage2_used: bool | None) -> str:
+    if stage2_used is None:
+        return "n/a"
+    return "Да" if stage2_used else "Нет"
 
 
 def _build_output_dir(settings: BenchmarkSettings) -> Path:
@@ -437,6 +504,10 @@ def _records_payload(
                 "nga_mutation_fraction": settings.nga_mutation_fraction,
                 "nga_trigger_points": list(settings.nga_trigger_points),
                 "nga_mutate_points": list(settings.nga_mutate_points),
+                "restart_population_mode": settings.restart_population_mode,
+                "restart_mutation_fraction": settings.restart_mutation_fraction,
+                "stage2_crossover_type": settings.stage2_crossover_type,
+                "stage2_mutation_type": settings.stage2_mutation_type,
                 "generation_mode": settings.generation_mode,
                 "seed": settings.seed,
                 "resume": settings.resume,
@@ -465,6 +536,10 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "nga_mutation_fraction",
         "nga_trigger_points",
         "nga_mutate_points",
+        "restart_population_mode",
+        "restart_mutation_fraction",
+        "stage2_crossover_type",
+        "stage2_mutation_type",
         "target_sum",
         "hidden_vector",
         "best_vector",
@@ -476,6 +551,11 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "nga_used",
         "nga_trigger_generation",
         "nga_trigger_generations",
+        "stage1_run_count",
+        "stage2_run_count",
+        "stage2_used",
+        "stage1_best_differences",
+        "stage2_best_differences",
         "stop_reason",
         "elapsed_seconds",
         "status",
@@ -491,6 +571,7 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
             row["algorithm_mode"] = ALGORITHM_MODE_LABELS[row["algorithm_mode"]]
             row["exact_match"] = _format_exact_match(row["exact_match"])
             row["nga_used"] = _format_nga_used(row["nga_used"])
+            row["stage2_used"] = _format_stage2_used(row["stage2_used"])
             row["stop_reason"] = _format_stop_reason(row["stop_reason"])
             row["elapsed_seconds"] = "n/a" if row["elapsed_seconds"] is None else f"{float(row['elapsed_seconds']):.6f}"
             writer.writerow({CSV_FIELD_LABELS[field]: row[field] for field in field_order})
@@ -510,6 +591,7 @@ def _group_summary(records: list[BenchmarkRecord]) -> list[dict[str, Any]]:
         completed_records = [record for record in group_records if record.status == "completed"]
         exact_matches = sum(1 for record in completed_records if record.exact_match)
         nga_used_runs = sum(1 for record in completed_records if record.nga_used)
+        stage2_used_runs = sum(1 for record in completed_records if record.stage2_used)
 
         average_time = None
         average_generations = None
@@ -530,6 +612,7 @@ def _group_summary(records: list[BenchmarkRecord]) -> list[dict[str, Any]]:
                 "runs": len(completed_records),
                 "exact_matches": exact_matches,
                 "nga_used_runs": nga_used_runs,
+                "stage2_used_runs": stage2_used_runs,
                 "exact_match_rate": exact_rate,
                 "avg_fitness": average_fitness,
                 "avg_generations_used": average_generations,
@@ -570,6 +653,10 @@ def _write_summary(
         f"- Доля сильной мутации NGA: `{settings.nga_mutation_fraction}`",
         f"- Точки staged NGA: `{list(settings.nga_trigger_points)}`",
         f"- Сила staged NGA (%): `{list(settings.nga_mutate_points)}`",
+        f"- Режим restart-популяции: `{settings.restart_population_mode}`",
+        f"- Сила restart-мутации: `{settings.restart_mutation_fraction}`",
+        f"- Кроссовер 2 этапа: `{settings.stage2_crossover_type}`",
+        f"- Мутация 2 этапа: `{settings.stage2_mutation_type}`",
         f"- Базовый seed: `{settings.seed}`",
         "",
         "## Сводные результаты",
@@ -578,8 +665,8 @@ def _write_summary(
         f"- Всего запланированных прогонов: `{len(_iter_matrix(settings))}`",
         f"- Папка результатов: `{output_dir}`",
         "",
-        "| n | Режим алгоритма | Размер популяции | Лимит без улучшения | Завершённых прогонов | Точных совпадений | Использований NGA | Доля точных совпадений % | Средний fitness | Среднее число поколений | Среднее время, сек |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| n | Режим алгоритма | Размер популяции | Лимит без улучшения | Завершённых прогонов | Точных совпадений | Использований NGA | Использований 2 этапа | Доля точных совпадений % | Средний fitness | Среднее число поколений | Среднее время, сек |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
 
     for row in summary_rows:
@@ -595,6 +682,7 @@ def _write_summary(
             f"{row['runs']} | "
             f"{row['exact_matches']} | "
             f"{row['nga_used_runs']} | "
+            f"{row['stage2_used_runs']} | "
             f"{row['exact_match_rate']:.2f} | "
             f"{avg_fitness} | "
             f"{avg_generations} | "
@@ -634,6 +722,13 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
         if record_key in records_by_key and records_by_key[record_key].status == "completed":
             continue
 
+        solver_mode = "two_stage_restart" if algorithm_mode == "two_stage_restart" else "classic"
+        nga_mode: NgaMode = algorithm_mode if algorithm_mode in {
+            "none",
+            "two_point",
+            "elite_heavy_mutation",
+            "staged_hypermutation",
+        } else "none"
         repeat_limit = stop_limit if algorithm_mode in {"two_point", "elite_heavy_mutation"} else None
         nga_trigger_points = settings.nga_trigger_points if algorithm_mode == "staged_hypermutation" else ()
         nga_mutate_points = settings.nga_mutate_points if algorithm_mode == "staged_hypermutation" else (40,)
@@ -649,6 +744,7 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
 
         try:
             config = GeneticAlgorithmConfig(
+                solver_mode=solver_mode,
                 population_size=population_size,
                 generations=settings.generations,
                 stagnation=stop_limit,
@@ -656,10 +752,14 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 crossover_rate=settings.crossover_rate,
                 mutation_rate=settings.mutation_rate,
                 tournament_size=settings.tournament_size,
-                nga_mode=algorithm_mode,
+                nga_mode=nga_mode,
                 nga_mutation_fraction=settings.nga_mutation_fraction,
                 nga_trigger_points=nga_trigger_points,
                 nga_mutate_points=nga_mutate_points,
+                restart_population_mode=settings.restart_population_mode,
+                restart_mutation_fraction=settings.restart_mutation_fraction,
+                stage2_crossover_type=settings.stage2_crossover_type,
+                stage2_mutation_type=settings.stage2_mutation_type,
             )
             task_started_at = perf_counter()
             result = solve_with_genetic_algorithm(
@@ -684,6 +784,10 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 nga_mutation_fraction=settings.nga_mutation_fraction,
                 nga_trigger_points=_format_int_tuple(nga_trigger_points),
                 nga_mutate_points=_format_int_tuple(nga_mutate_points),
+                restart_population_mode=settings.restart_population_mode,
+                restart_mutation_fraction=settings.restart_mutation_fraction,
+                stage2_crossover_type=settings.stage2_crossover_type,
+                stage2_mutation_type=settings.stage2_mutation_type,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 target_sum=problem.target_sum,
@@ -697,6 +801,11 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 nga_used=result.nga_used,
                 nga_trigger_generation=result.nga_trigger_generation,
                 nga_trigger_generations=_format_vector(result.nga_trigger_generations),
+                stage1_run_count=result.stage1_run_count,
+                stage2_run_count=result.stage2_run_count,
+                stage2_used=result.stage2_used,
+                stage1_best_differences=_format_vector(result.stage1_best_differences),
+                stage2_best_differences=_format_vector(result.stage2_best_differences),
                 stop_reason=result.stop_reason,
                 elapsed_seconds=task_elapsed_seconds,
                 status="completed",
@@ -717,6 +826,10 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 nga_mutation_fraction=settings.nga_mutation_fraction,
                 nga_trigger_points=_format_int_tuple(nga_trigger_points),
                 nga_mutate_points=_format_int_tuple(nga_mutate_points),
+                restart_population_mode=settings.restart_population_mode,
+                restart_mutation_fraction=settings.restart_mutation_fraction,
+                stage2_crossover_type=settings.stage2_crossover_type,
+                stage2_mutation_type=settings.stage2_mutation_type,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 stop_reason="failed",
@@ -748,6 +861,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         nga_mutation_fraction=args.nga_mutation_fraction,
         nga_trigger_points=args.nga_trigger_points,
         nga_mutate_points=args.nga_mutate_points,
+        restart_population_mode=args.restart_population_mode,
+        restart_mutation_fraction=args.restart_mutation_fraction,
+        stage2_crossover_type=args.stage2_crossover_type,
+        stage2_mutation_type=args.stage2_mutation_type,
         generation_mode=args.generation_mode,
         seed=args.seed,
         output_root=args.output_root,
@@ -760,6 +877,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Режимы алгоритма: {[ALGORITHM_MODE_LABELS[mode] for mode in settings.algorithm_modes]}")
     print(f"Точки staged NGA: {list(settings.nga_trigger_points)}")
     print(f"Сила staged NGA (%): {list(settings.nga_mutate_points)}")
+    print(f"Режим restart-популяции: {settings.restart_population_mode}")
+    print(f"Сила restart-мутации: {settings.restart_mutation_fraction}")
+    print(f"Кроссовер 2 этапа: {settings.stage2_crossover_type}")
+    print(f"Мутация 2 этапа: {settings.stage2_mutation_type}")
     print(f"State-файл: {_state_path(output_dir)}")
     print(f"CSV-файл: {_csv_path(output_dir)}")
     print(f"Markdown-файл: {_summary_path(output_dir)}")

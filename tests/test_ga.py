@@ -196,6 +196,151 @@ class GeneticAlgorithmTests(unittest.TestCase):
         self.assertEqual(result.difference, 1)
         self.assertEqual(result.nga_trigger_generations, [])
 
+    def test_two_stage_restart_transitions_to_stage2_and_stops_on_equal_difference(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="two_stage_restart",
+            population_size=6,
+            generations=3,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=0.0,
+            tournament_size=2,
+            restart_mutation_fraction=0.4,
+            stage2_crossover_type="two_point",
+            stage2_mutation_type="two_point",
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[4, 8],
+            target_sum=3,
+            config=config,
+            rng=Random(7),
+        )
+
+        self.assertFalse(result.exact_match)
+        self.assertEqual(result.stop_reason, "stagnation")
+        self.assertEqual(result.difference, 1)
+        self.assertEqual(result.generations_used, 4)
+        self.assertFalse(result.nga_used)
+        self.assertEqual(result.restart_count, 0)
+        self.assertFalse(result.rescue_used)
+        self.assertEqual(result.stage1_run_count, 2)
+        self.assertEqual(result.stage2_run_count, 2)
+        self.assertTrue(result.stage2_used)
+        self.assertEqual(result.stage1_best_differences, [1, 1])
+        self.assertEqual(result.stage2_best_differences, [1, 1])
+
+    def test_two_stage_restart_stays_on_stage1_when_second_run_improves(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="two_stage_restart",
+            population_size=6,
+            generations=3,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=0.0,
+            tournament_size=2,
+            restart_mutation_fraction=0.4,
+            stage2_crossover_type="two_point",
+            stage2_mutation_type="two_point",
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[1, 3, 7],
+            target_sum=1,
+            config=config,
+            rng=Random(6),
+        )
+
+        self.assertTrue(result.exact_match)
+        self.assertEqual(result.stop_reason, "exact_match")
+        self.assertEqual(result.stage1_run_count, 2)
+        self.assertEqual(result.stage2_run_count, 0)
+        self.assertFalse(result.stage2_used)
+        self.assertEqual(result.stage1_best_differences, [1, 0])
+        self.assertEqual(result.stage2_best_differences, [])
+
+    def test_two_stage_restart_can_find_exact_match_on_stage2(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="two_stage_restart",
+            population_size=6,
+            generations=3,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=0.0,
+            tournament_size=2,
+            restart_mutation_fraction=0.4,
+            stage2_crossover_type="two_point",
+            stage2_mutation_type="two_point",
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[1, 3, 7],
+            target_sum=1,
+            config=config,
+            rng=Random(25),
+        )
+
+        self.assertTrue(result.exact_match)
+        self.assertEqual(result.stop_reason, "exact_match")
+        self.assertEqual(result.stage1_run_count, 2)
+        self.assertEqual(result.stage2_run_count, 1)
+        self.assertTrue(result.stage2_used)
+        self.assertEqual(result.stage1_best_differences, [1, 1])
+        self.assertEqual(result.stage2_best_differences, [0])
+
+    def test_two_stage_restart_stage2_compares_with_previous_stage2_run(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="two_stage_restart",
+            population_size=6,
+            generations=4,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=0.0,
+            tournament_size=2,
+            restart_mutation_fraction=0.4,
+            stage2_crossover_type="two_point",
+            stage2_mutation_type="two_point",
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[1, 3, 7],
+            target_sum=3,
+            config=config,
+            rng=Random(494),
+        )
+
+        self.assertFalse(result.exact_match)
+        self.assertEqual(result.stop_reason, "stagnation")
+        self.assertEqual(result.stage1_run_count, 2)
+        self.assertEqual(result.stage2_run_count, 3)
+        self.assertTrue(result.stage2_used)
+        self.assertEqual(result.stage1_best_differences, [2, 2])
+        self.assertEqual(result.stage2_best_differences, [2, 1, 1])
+
+    def test_two_stage_restart_propagates_generation_limit(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="two_stage_restart",
+            population_size=6,
+            generations=2,
+            stagnation=2,
+            crossover_rate=0.0,
+            mutation_rate=1.0,
+            tournament_size=2,
+            restart_mutation_fraction=0.4,
+            stage2_crossover_type="two_point",
+            stage2_mutation_type="two_point",
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[1, 3, 7],
+            target_sum=1,
+            config=config,
+            rng=Random(179),
+        )
+
+        self.assertFalse(result.exact_match)
+        self.assertEqual(result.stop_reason, "generation_limit")
+        self.assertEqual(result.stage1_run_count, 1)
+        self.assertEqual(result.stage2_run_count, 0)
+        self.assertFalse(result.stage2_used)
+        self.assertEqual(result.stage1_best_differences, [1])
+        self.assertEqual(result.stage2_best_differences, [])
+
     def test_staged_hypermutation_requires_valid_points(self) -> None:
         with self.assertRaises(ValueError):
             GeneticAlgorithmConfig(
@@ -205,6 +350,14 @@ class GeneticAlgorithmTests(unittest.TestCase):
                 nga_mode="staged_hypermutation",
                 nga_trigger_points=(5,),
                 nga_mutate_points=(40,),
+            )
+
+    def test_two_stage_restart_requires_generations_not_less_than_stagnation(self) -> None:
+        with self.assertRaises(ValueError):
+            GeneticAlgorithmConfig(
+                solver_mode="two_stage_restart",
+                generations=4,
+                stagnation=5,
             )
 
 

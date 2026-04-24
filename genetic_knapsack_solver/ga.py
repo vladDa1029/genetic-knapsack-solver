@@ -6,7 +6,11 @@ from random import Random
 from typing import Callable
 
 from genetic_knapsack_solver.generator import dot_product
-from genetic_knapsack_solver.models import GeneticAlgorithmConfig, GeneticAlgorithmResult
+from genetic_knapsack_solver.models import GeneticAlgorithmConfig, GeneticAlgorithmResult, OperatorType
+
+
+CrossoverFunction = Callable[[list[int], list[int], Random], tuple[list[int], list[int]]]
+MutationFunction = Callable[[list[int], float, Random], list[int]]
 
 
 @dataclass(slots=True)
@@ -175,8 +179,8 @@ def _build_next_population(
     evaluations: list[tuple[int, int]],
     config: GeneticAlgorithmConfig,
     rng: Random,
-    crossover_fn: Callable[[list[int], list[int], Random], tuple[list[int], list[int]]],
-    mutate_fn: Callable[[list[int], float, Random], list[int]],
+    crossover_fn: CrossoverFunction,
+    mutate_fn: MutationFunction,
 ) -> list[list[int]]:
     ranked_indices = _rank_population_indices(evaluations)
     next_generation = [population[ranked_indices[0]][:]]
@@ -295,6 +299,18 @@ def _copy_population(population: list[list[int]]) -> list[list[int]]:
     return [vector[:] for vector in population]
 
 
+def _resolve_crossover_fn(operator_type: OperatorType) -> CrossoverFunction:
+    if operator_type == "two_point":
+        return crossover_two_points
+    return crossover
+
+
+def _resolve_mutation_fn(operator_type: OperatorType) -> MutationFunction:
+    if operator_type == "two_point":
+        return mutate_two_points
+    return mutate
+
+
 def _single_run(
     prices: list[int],
     target_sum: int,
@@ -303,6 +319,8 @@ def _single_run(
     initial_population: list[list[int]] | None = None,
     stop_on_stagnation: bool = True,
     allow_nga: bool = False,
+    crossover_fn: CrossoverFunction = crossover,
+    mutate_fn: MutationFunction = mutate,
 ) -> _SingleRunResult:
     current_population = (
         build_initial_population(len(prices), config.population_size, rng)
@@ -339,8 +357,8 @@ def _single_run(
             evaluations,
             config,
             rng,
-            crossover,
-            mutate,
+            crossover_fn,
+            mutate_fn,
         )
         evaluations = _evaluate_population(current_population, prices, target_sum)
         current_best_vector, current_best_sum, current_best_difference = _best_from_population(
@@ -477,6 +495,29 @@ def _build_rescue_population(
     return rescue_population
 
 
+def _build_restart_population(
+    base_population: list[list[int]],
+    elite_vector: list[int],
+    population_mode: str,
+    mutation_fraction: float,
+    rng: Random,
+) -> list[list[int]]:
+    if population_mode != "elite_from_last_population":
+        raise ValueError(f"unsupported restart_population_mode: {population_mode}")
+    if not base_population:
+        return [elite_vector[:]]
+
+    elite_index = next((index for index, vector in enumerate(base_population) if vector == elite_vector), 0)
+    restart_population = [elite_vector[:]]
+
+    for index, vector in enumerate(base_population):
+        if index == elite_index:
+            continue
+        restart_population.append(mutate_many_bits(vector, mutation_fraction, rng))
+
+    return restart_population
+
+
 def _choose_better_run(
     first: _SingleRunResult,
     second: _SingleRunResult,
@@ -496,6 +537,11 @@ def _build_result(
     stop_reason: str,
     restart_count: int,
     rescue_used: bool,
+    stage1_run_count: int = 0,
+    stage2_run_count: int = 0,
+    stage2_used: bool = False,
+    stage1_best_differences: list[int] | None = None,
+    stage2_best_differences: list[int] | None = None,
 ) -> GeneticAlgorithmResult:
     return GeneticAlgorithmResult(
         best_vector=run.best_vector,
@@ -510,6 +556,11 @@ def _build_result(
         nga_trigger_generations=run.nga_trigger_generations[:],
         restart_count=restart_count,
         rescue_used=rescue_used,
+        stage1_run_count=stage1_run_count,
+        stage2_run_count=stage2_run_count,
+        stage2_used=stage2_used,
+        stage1_best_differences=[] if stage1_best_differences is None else stage1_best_differences[:],
+        stage2_best_differences=[] if stage2_best_differences is None else stage2_best_differences[:],
     )
 
 
@@ -656,6 +707,113 @@ def _solve_restart_rescue(
         )
 
 
+def _solve_two_stage_restart(
+    prices: list[int],
+    target_sum: int,
+    config: GeneticAlgorithmConfig,
+    rng: Random,
+) -> GeneticAlgorithmResult:
+    total_generations = 0
+    stage = 1
+    current_population: list[list[int]] | None = None
+    stage1_best_differences: list[int] = []
+    stage2_best_differences: list[int] = []
+    stage1_run_count = 0
+    stage2_run_count = 0
+    stage2_used = False
+    current_crossover_fn = crossover
+    current_mutate_fn = mutate
+
+    while True:
+        run = _single_run(
+            prices=prices,
+            target_sum=target_sum,
+            config=config,
+            rng=rng,
+            initial_population=current_population,
+            stop_on_stagnation=True,
+            allow_nga=False,
+            crossover_fn=current_crossover_fn,
+            mutate_fn=current_mutate_fn,
+        )
+        total_generations += run.generations_used
+
+        if stage == 1:
+            stage1_run_count += 1
+            stage1_best_differences.append(run.difference)
+        else:
+            stage2_run_count += 1
+            stage2_best_differences.append(run.difference)
+            stage2_used = True
+
+        if run.stop_reason == "exact_match":
+            return _build_result(
+                run=run,
+                generations_used=total_generations,
+                stop_reason="exact_match",
+                restart_count=0,
+                rescue_used=False,
+                stage1_run_count=stage1_run_count,
+                stage2_run_count=stage2_run_count,
+                stage2_used=stage2_used,
+                stage1_best_differences=stage1_best_differences,
+                stage2_best_differences=stage2_best_differences,
+            )
+
+        if run.stop_reason == "generation_limit":
+            return _build_result(
+                run=run,
+                generations_used=total_generations,
+                stop_reason="generation_limit",
+                restart_count=0,
+                rescue_used=False,
+                stage1_run_count=stage1_run_count,
+                stage2_run_count=stage2_run_count,
+                stage2_used=stage2_used,
+                stage1_best_differences=stage1_best_differences,
+                stage2_best_differences=stage2_best_differences,
+            )
+
+        current_population = _build_restart_population(
+            base_population=run.population,
+            elite_vector=run.best_vector,
+            population_mode=config.restart_population_mode,
+            mutation_fraction=config.restart_mutation_fraction,
+            rng=rng,
+        )
+
+        if stage == 1:
+            if (
+                len(stage1_best_differences) >= 2
+                and stage1_best_differences[-1] == stage1_best_differences[-2]
+            ):
+                stage = 2
+                current_crossover_fn = _resolve_crossover_fn(config.stage2_crossover_type)
+                current_mutate_fn = _resolve_mutation_fn(config.stage2_mutation_type)
+                continue
+
+            current_crossover_fn = crossover
+            current_mutate_fn = mutate
+            continue
+
+        if (
+            len(stage2_best_differences) >= 2
+            and stage2_best_differences[-1] == stage2_best_differences[-2]
+        ):
+            return _build_result(
+                run=run,
+                generations_used=total_generations,
+                stop_reason="stagnation",
+                restart_count=0,
+                rescue_used=False,
+                stage1_run_count=stage1_run_count,
+                stage2_run_count=stage2_run_count,
+                stage2_used=stage2_used,
+                stage1_best_differences=stage1_best_differences,
+                stage2_best_differences=stage2_best_differences,
+            )
+
+
 def solve_with_genetic_algorithm(
     prices: list[int],
     target_sum: int,
@@ -664,6 +822,13 @@ def solve_with_genetic_algorithm(
 ) -> GeneticAlgorithmResult:
     if config.solver_mode == "restart_rescue":
         return _solve_restart_rescue(
+            prices=prices,
+            target_sum=target_sum,
+            config=config,
+            rng=rng,
+        )
+    if config.solver_mode == "two_stage_restart":
+        return _solve_two_stage_restart(
             prices=prices,
             target_sum=target_sum,
             config=config,
