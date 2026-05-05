@@ -7,8 +7,14 @@ from genetic_knapsack_solver.ga import (
     fitness,
     mutate,
     mutate_many_bits,
+    mutate_reverse,
     mutate_two_points,
     solve_with_genetic_algorithm,
+)
+from genetic_knapsack_solver.rust_core import (
+    RustCoreUnavailable,
+    rust_core_available,
+    solve_with_rust_core,
 )
 from genetic_knapsack_solver.generator import (
     count_target_solutions,
@@ -36,7 +42,11 @@ __all__ = [
     "main",
     "mutate",
     "mutate_many_bits",
+    "mutate_reverse",
     "mutate_two_points",
     "run_benchmark",
+    "RustCoreUnavailable",
+    "rust_core_available",
     "solve_with_genetic_algorithm",
+    "solve_with_rust_core",
 ]

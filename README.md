@@ -206,7 +206,7 @@ uv run --python pypy3.11 python main.py --solver-mode two_stage_restart --items 
 - `--restart-population-mode elite_from_last_population` - стратегия построения новой популяции между запусками.
 - `--restart-mutation-fraction 0.4` - доля битов для сильной мутации между запусками.
 - `--stage2-crossover-type one_point|two_point` - тип кроссовера на втором этапе.
-- `--stage2-mutation-type one_point|two_point` - тип мутации на втором этапе.
+- `--stage2-mutation-type one_point|two_point|reverse` - тип мутации на втором этапе; `reverse` разворачивает вектор как `vector[::-1]`.
 
 ## Benchmark
 
@@ -230,9 +230,10 @@ Benchmark-режимы задаются через `--algorithm-modes`.
 - `two_point` - `classic + two_point`.
 - `elite_heavy_mutation` - `classic + elite_heavy_mutation`.
 - `staged_hypermutation` - `classic + staged_hypermutation`.
+- `restart_rescue` - solver `restart_rescue`.
 - `two_stage_restart` - новый solver `two_stage_restart`.
 
-`restart_rescue` сейчас запускается через `main.py`; в benchmark-матрицу он не включён отдельным `algorithm_mode`.
+Все реализованные solver-режимы можно запускать через `benchmark.py`: `classic` представлен режимами `none`, `two_point`, `elite_heavy_mutation`, `staged_hypermutation`, отдельные solver-режимы представлены как `restart_rescue` и `two_stage_restart`.
 
 ## Параметры `benchmark.py`
 
@@ -244,14 +245,16 @@ Benchmark-режимы задаются через `--algorithm-modes`.
 - `--crossover-rate 0.95` - вероятность кроссовера.
 - `--tournament-size 3` - размер турнира.
 - `--population-stop-pairs 3000:3000,5000:5000` - пары `population_size:stagnation`.
-- `--algorithm-modes none,two_point,elite_heavy_mutation,staged_hypermutation,two_stage_restart` - список режимов.
+- `--algorithm-modes none,two_point,elite_heavy_mutation,staged_hypermutation,restart_rescue,two_stage_restart` - список режимов.
 - `--nga-mutation-fraction 0.4` - доля сильной мутации для `elite_heavy_mutation`.
 - `--nga-trigger-points 50,100,150` - точки стагнации для `staged_hypermutation`.
 - `--nga-mutate-points 40` или `--nga-mutate-points 40,50,60` - сила мутации для `staged_hypermutation`.
+- `--restart-max-count 5` - максимальное число полных рестартов для `restart_rescue`; если не задано, лимит не применяется.
+- `--rescue-min-mutated-bits-ratio 0.4` - минимальная доля мутируемых битов для rescue-этапа `restart_rescue`.
 - `--restart-population-mode elite_from_last_population` - стратегия restart-популяции для `two_stage_restart`.
 - `--restart-mutation-fraction 0.4` - сила restart-мутации для `two_stage_restart`.
 - `--stage2-crossover-type one_point|two_point` - кроссовер второго этапа для `two_stage_restart`.
-- `--stage2-mutation-type one_point|two_point` - мутация второго этапа для `two_stage_restart`.
+- `--stage2-mutation-type one_point|two_point|reverse` - мутация второго этапа для `two_stage_restart`; пример `reverse`: `[1,0,1,1,1,1,1,0,0,0] -> [0,0,0,1,1,1,1,1,0,1]`.
 - `--seed 42` - базовый seed.
 - `--output-root benchmark_results` - корневая папка для автоматически создаваемых каталогов.
 - `--output-dir benchmark_results\my_run` - явный каталог результата.
@@ -262,7 +265,7 @@ Benchmark-режимы задаются через `--algorithm-modes`.
 Быстрый smoke benchmark по всем режимам:
 
 ```powershell
-uv run --python pypy3.11 python benchmark.py --repeats 1 --items 6 --generations 12 --mutation-rate 0.4 --crossover-rate 0.6 --population-stop-pairs 10:3 --algorithm-modes none,two_point,elite_heavy_mutation,staged_hypermutation,two_stage_restart --nga-trigger-points 1 --nga-mutate-points 40 --output-dir benchmark_results\smoke_run
+uv run --python pypy3.11 python benchmark.py --repeats 1 --items 6 --generations 12 --mutation-rate 0.4 --crossover-rate 0.6 --population-stop-pairs 10:3 --algorithm-modes none,two_point,elite_heavy_mutation,staged_hypermutation,restart_rescue,two_stage_restart --nga-trigger-points 1 --nga-mutate-points 40 --restart-max-count 1 --output-dir benchmark_results\smoke_run
 ```
 
 Benchmark только нового метода для `n > 25` и пар `3000:3000`, `5000:5000`:
@@ -271,10 +274,16 @@ Benchmark только нового метода для `n > 25` и пар `3000
 uv run --python pypy3.11 python benchmark.py --items 26,27,28 --population-stop-pairs 3000:3000,5000:5000 --algorithm-modes two_stage_restart --output-dir benchmark_results\two_stage_restart_pypy_n26_n28_p3000_p5000
 ```
 
+Benchmark только `restart_rescue`:
+
+```powershell
+uv run --python pypy3.11 python benchmark.py --items 26,27,28 --population-stop-pairs 3000:3000,5000:5000 --algorithm-modes restart_rescue --restart-max-count 5 --rescue-min-mutated-bits-ratio 0.4 --output-dir benchmark_results\restart_rescue_pypy_n26_n28_p3000_p5000
+```
+
 Полная матрица всех benchmark-режимов:
 
 ```powershell
-uv run --python pypy3.11 python benchmark.py --repeats 33 --items 25,26 --generation-mode superincreasing_disguised --generations 500000 --mutation-rate 0.9 --crossover-rate 0.95 --population-stop-pairs 500:500,1000:1000,2000:2000,3000:3000,5000:5000 --algorithm-modes none,two_point,elite_heavy_mutation,staged_hypermutation,two_stage_restart --nga-trigger-points 50,100,150 --nga-mutate-points 40
+uv run --python pypy3.11 python benchmark.py --repeats 33 --items 25,26 --generation-mode superincreasing_disguised --generations 500000 --mutation-rate 0.9 --crossover-rate 0.95 --population-stop-pairs 500:500,1000:1000,2000:2000,3000:3000,5000:5000 --algorithm-modes none,two_point,elite_heavy_mutation,staged_hypermutation,restart_rescue,two_stage_restart --nga-trigger-points 50,100,150 --nga-mutate-points 40 --restart-max-count 5
 ```
 
 Продолжить прерванный прогон:
@@ -305,6 +314,4 @@ uv run --python pypy3.11 python -m pytest -q
 
 ## Дополнительная документация
 
-- Текущие реализованные режимы проекта: [docs/current_project_modes.md](/D:/Users/vladD/Work/genetic-knapsack-solver/docs/current_project_modes.md)
-- ТЗ на планируемый режим многошагового `NGA`: [docs/planned_staged_hypermutation_nga.md](/D:/Users/vladD/Work/genetic-knapsack-solver/docs/planned_staged_hypermutation_nga.md)
-- ТЗ на двухэтапный solver: [docs/planned_two_stage_restart_solver.md](/D:/Users/vladD/Work/genetic-knapsack-solver/docs/planned_two_stage_restart_solver.md)
+- [Итоговые тесты](benchmark_results/2026-04-21_filtered_analysis_pop2000plus.md) 

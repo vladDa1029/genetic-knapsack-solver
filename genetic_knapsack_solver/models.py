@@ -7,7 +7,10 @@ from typing import Literal
 NgaMode = Literal["none", "two_point", "elite_heavy_mutation", "staged_hypermutation"]
 SolverMode = Literal["classic", "restart_rescue", "two_stage_restart"]
 RestartPopulationMode = Literal["elite_from_last_population"]
-OperatorType = Literal["one_point", "two_point"]
+CrossoverType = Literal["one_point", "two_point"]
+MutationType = Literal["one_point", "two_point", "reverse"]
+Stage2OffspringMode = Literal["two_children", "four_children_select_two"]
+OperatorType = Literal["one_point", "two_point", "reverse"]
 
 
 @dataclass(slots=True)
@@ -37,8 +40,9 @@ class GeneticAlgorithmConfig:
     rescue_min_mutated_bits_ratio: float = 0.4
     restart_population_mode: RestartPopulationMode = "elite_from_last_population"
     restart_mutation_fraction: float = 0.4
-    stage2_crossover_type: OperatorType = "two_point"
-    stage2_mutation_type: OperatorType = "two_point"
+    stage2_crossover_type: CrossoverType = "two_point"
+    stage2_mutation_type: MutationType = "two_point"
+    stage2_offspring_mode: Stage2OffspringMode = "two_children"
 
     def __post_init__(self) -> None:
         if self.solver_mode not in ("classic", "restart_rescue", "two_stage_restart"):
@@ -63,8 +67,12 @@ class GeneticAlgorithmConfig:
             raise ValueError("restart_population_mode must be one of: elite_from_last_population")
         if self.stage2_crossover_type not in ("one_point", "two_point"):
             raise ValueError("stage2_crossover_type must be one of: one_point, two_point")
-        if self.stage2_mutation_type not in ("one_point", "two_point"):
-            raise ValueError("stage2_mutation_type must be one of: one_point, two_point")
+        if self.stage2_mutation_type not in ("one_point", "two_point", "reverse"):
+            raise ValueError("stage2_mutation_type must be one of: one_point, two_point, reverse")
+        if self.stage2_offspring_mode not in ("two_children", "four_children_select_two"):
+            raise ValueError(
+                "stage2_offspring_mode must be one of: two_children, four_children_select_two"
+            )
         for name, value in (
             ("crossover_rate", self.crossover_rate),
             ("mutation_rate", self.mutation_rate),

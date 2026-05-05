@@ -2,3 +2,4 @@
 __pycache__/
 *.py[cod]
 benchmark_results/
+rust_core/target/

@@ -29,9 +29,21 @@ RESTART_POPULATION_MODE_LABELS = {
     "elite_from_last_population": "Элита прошлого запуска + сильная мутация остальных",
 }
 
-OPERATOR_TYPE_LABELS = {
+CROSSOVER_TYPE_LABELS = {
     "one_point": "Одноточечный",
     "two_point": "Двухточечный",
+}
+
+MUTATION_TYPE_LABELS = {
+    "one_point": "Одноточечная",
+    "two_point": "Двухточечная",
+    "reverse": "Разворот вектора",
+}
+
+
+STAGE2_OFFSPRING_MODE_LABELS = {
+    "two_children": "2 родителя -> 2 ребёнка",
+    "four_children_select_two": "2 родителя -> 4 ребёнка -> выбрать 2 лучших",
 }
 
 
@@ -151,15 +163,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stage2-crossover-type",
-        choices=tuple(OPERATOR_TYPE_LABELS),
+        choices=tuple(CROSSOVER_TYPE_LABELS),
         default="two_point",
         help="Тип кроссовера для 2 этапа two_stage_restart.",
     )
     parser.add_argument(
         "--stage2-mutation-type",
-        choices=tuple(OPERATOR_TYPE_LABELS),
+        choices=tuple(MUTATION_TYPE_LABELS),
         default="two_point",
         help="Тип мутации для 2 этапа two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage2-offspring-mode",
+        choices=tuple(STAGE2_OFFSPRING_MODE_LABELS),
+        default="two_children",
+        help="РЎС…РµРјР° РїРѕСЃС‚СЂРѕРµРЅРёСЏ РїРѕС‚РѕРјРєРѕРІ РЅР° 2 СЌС‚Р°РїРµ two_stage_restart.",
     )
     parser.add_argument(
         "--seed",
@@ -203,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         restart_mutation_fraction=args.restart_mutation_fraction,
         stage2_crossover_type=args.stage2_crossover_type,
         stage2_mutation_type=args.stage2_mutation_type,
+        stage2_offspring_mode=args.stage2_offspring_mode,
     )
     result = solve_with_genetic_algorithm(
         prices=problem.prices,
@@ -234,8 +253,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Минимальная доля битов rescue: {config.rescue_min_mutated_bits_ratio}")
     print(f"Режим restart-популяции: {RESTART_POPULATION_MODE_LABELS[config.restart_population_mode]}")
     print(f"Сила restart-мутации: {config.restart_mutation_fraction}")
-    print(f"Кроссовер 2 этапа: {OPERATOR_TYPE_LABELS[config.stage2_crossover_type]}")
-    print(f"Мутация 2 этапа: {OPERATOR_TYPE_LABELS[config.stage2_mutation_type]}")
+    print(f"Кроссовер 2 этапа: {CROSSOVER_TYPE_LABELS[config.stage2_crossover_type]}")
+    print(f"Мутация 2 этапа: {MUTATION_TYPE_LABELS[config.stage2_mutation_type]}")
+    print(f"Схема потомков 2 этапа: {STAGE2_OFFSPRING_MODE_LABELS[config.stage2_offspring_mode]}")
     print(f"Лучшее решение: {_format_vector(result.best_vector)}")
     print(f"Найденная сумма: {result.best_sum}")
     print(f"Fitness: {result.fitness}")

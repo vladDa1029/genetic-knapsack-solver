@@ -4,11 +4,14 @@ import unittest
 from random import Random
 
 from genetic_knapsack_solver.ga import (
+    _produce_offspring,
     crossover,
     crossover_two_points,
+    evaluate_vector,
     fitness,
     mutate,
     mutate_many_bits,
+    mutate_reverse,
     mutate_two_points,
     solve_with_genetic_algorithm,
 )
@@ -30,10 +33,58 @@ class GeneticAlgorithmTests(unittest.TestCase):
 
         mutated = mutate([0, 0, 0, 0], 1.0, Random(3))
         mutated_two_points = mutate_two_points([0, 0, 0, 0], 1.0, Random(3))
+        mutated_reverse = mutate_reverse([1, 0, 1, 1, 1, 1, 1, 0, 0, 0], 1.0, Random(3))
         mutated_many_bits = mutate_many_bits([0] * 10, 0.4, Random(11))
         self.assertEqual(sum(mutated), 1)
         self.assertEqual(sum(mutated_two_points), 2)
+        self.assertEqual(mutated_reverse, [0, 0, 0, 1, 1, 1, 1, 1, 0, 1])
         self.assertEqual(sum(mutated_many_bits), 4)
+
+    def test_reverse_mutation_respects_mutation_rate(self) -> None:
+        vector = [1, 0, 1, 0]
+
+        self.assertEqual(mutate_reverse(vector, 0.0, Random(1)), vector)
+        self.assertEqual(mutate_reverse(vector, 1.0, Random(1)), [0, 1, 0, 1])
+
+    def test_four_children_select_two_keeps_best_two_children(self) -> None:
+        config = GeneticAlgorithmConfig(
+            population_size=6,
+            generations=5,
+            stagnation=2,
+            crossover_rate=1.0,
+            mutation_rate=1.0,
+            tournament_size=2,
+            stage2_offspring_mode="four_children_select_two",
+        )
+        helper_rng = Random(19)
+        selected_children = _produce_offspring(
+            parent_a=[1, 1, 1, 1, 1],
+            parent_b=[0, 0, 0, 0, 0],
+            prices=[16, 8, 4, 2, 1],
+            target_sum=7,
+            config=config,
+            rng=helper_rng,
+            crossover_fn=crossover_two_points,
+            mutate_fn=mutate_two_points,
+            offspring_mode="four_children_select_two",
+        )
+
+        manual_rng = Random(19)
+        if manual_rng.random() < config.crossover_rate:
+            child_a, child_b = crossover_two_points([1, 1, 1, 1, 1], [0, 0, 0, 0, 0], manual_rng)
+            child_c, child_d = crossover_two_points([1, 1, 1, 1, 1], [0, 0, 0, 0, 0], manual_rng)
+        else:
+            child_a, child_b = [1, 1, 1, 1, 1], [0, 0, 0, 0, 0]
+            child_c, child_d = [1, 1, 1, 1, 1], [0, 0, 0, 0, 0]
+        candidates = [
+            mutate_two_points(child_a, 1.0, manual_rng),
+            mutate_two_points(child_b, 1.0, manual_rng),
+            mutate_two_points(child_c, 1.0, manual_rng),
+            mutate_two_points(child_d, 1.0, manual_rng),
+        ]
+        candidates.sort(key=lambda child: evaluate_vector([16, 8, 4, 2, 1], 7, child))
+
+        self.assertEqual(selected_children, candidates[:2])
 
     def test_solver_stops_on_stagnation_without_nga(self) -> None:
         config = GeneticAlgorithmConfig(
@@ -285,6 +336,53 @@ class GeneticAlgorithmTests(unittest.TestCase):
         self.assertEqual(result.stage1_best_differences, [1, 1])
         self.assertEqual(result.stage2_best_differences, [0])
 
+    def test_two_stage_restart_accepts_reverse_mutation_on_stage2(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="two_stage_restart",
+            population_size=6,
+            generations=3,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=1.0,
+            tournament_size=2,
+            restart_mutation_fraction=0.4,
+            stage2_crossover_type="one_point",
+            stage2_mutation_type="reverse",
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[4, 8],
+            target_sum=3,
+            config=config,
+            rng=Random(7),
+        )
+
+        self.assertTrue(result.stage2_used)
+        self.assertEqual(config.stage2_mutation_type, "reverse")
+
+    def test_two_stage_restart_accepts_four_children_stage2_offspring_mode(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="two_stage_restart",
+            population_size=6,
+            generations=3,
+            stagnation=1,
+            crossover_rate=0.0,
+            mutation_rate=1.0,
+            tournament_size=2,
+            restart_mutation_fraction=0.4,
+            stage2_crossover_type="one_point",
+            stage2_mutation_type="reverse",
+            stage2_offspring_mode="four_children_select_two",
+        )
+        result = solve_with_genetic_algorithm(
+            prices=[4, 8],
+            target_sum=3,
+            config=config,
+            rng=Random(7),
+        )
+
+        self.assertTrue(result.stage2_used)
+        self.assertEqual(config.stage2_offspring_mode, "four_children_select_two")
+
     def test_two_stage_restart_stage2_compares_with_previous_stage2_run(self) -> None:
         config = GeneticAlgorithmConfig(
             solver_mode="two_stage_restart",
@@ -308,10 +406,10 @@ class GeneticAlgorithmTests(unittest.TestCase):
         self.assertFalse(result.exact_match)
         self.assertEqual(result.stop_reason, "stagnation")
         self.assertEqual(result.stage1_run_count, 2)
-        self.assertEqual(result.stage2_run_count, 3)
+        self.assertEqual(result.stage2_run_count, 2)
         self.assertTrue(result.stage2_used)
         self.assertEqual(result.stage1_best_differences, [2, 2])
-        self.assertEqual(result.stage2_best_differences, [2, 1, 1])
+        self.assertEqual(result.stage2_best_differences, [1, 1])
 
     def test_two_stage_restart_propagates_generation_limit(self) -> None:
         config = GeneticAlgorithmConfig(

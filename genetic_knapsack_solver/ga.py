@@ -6,7 +6,7 @@ from random import Random
 from typing import Callable
 
 from genetic_knapsack_solver.generator import dot_product
-from genetic_knapsack_solver.models import GeneticAlgorithmConfig, GeneticAlgorithmResult, OperatorType
+from genetic_knapsack_solver.models import CrossoverType, GeneticAlgorithmConfig, GeneticAlgorithmResult, MutationType
 
 
 CrossoverFunction = Callable[[list[int], list[int], Random], tuple[list[int], list[int]]]
@@ -117,6 +117,12 @@ def mutate_two_points(vector: list[int], mutation_rate: float, rng: Random) -> l
     return mutated
 
 
+def mutate_reverse(vector: list[int], mutation_rate: float, rng: Random) -> list[int]:
+    if not vector or rng.random() >= mutation_rate:
+        return vector[:]
+    return vector[::-1]
+
+
 def mutate_many_bits(
     vector: list[int],
     mutation_fraction: float,
@@ -177,10 +183,13 @@ def _rank_population_indices(evaluations: list[tuple[int, int]]) -> list[int]:
 def _build_next_population(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
+    prices: list[int],
+    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
     crossover_fn: CrossoverFunction,
     mutate_fn: MutationFunction,
+    offspring_mode: str = "two_children",
 ) -> list[list[int]]:
     ranked_indices = _rank_population_indices(evaluations)
     next_generation = [population[ranked_indices[0]][:]]
@@ -199,27 +208,75 @@ def _build_next_population(
             rng,
         )
 
-        if rng.random() < config.crossover_rate:
-            child_a, child_b = crossover_fn(parent_a, parent_b, rng)
-        else:
-            child_a, child_b = parent_a[:], parent_b[:]
-
-        next_generation.append(mutate_fn(child_a, config.mutation_rate, rng))
+        children = _produce_offspring(
+            parent_a=parent_a,
+            parent_b=parent_b,
+            prices=prices,
+            target_sum=target_sum,
+            config=config,
+            rng=rng,
+            crossover_fn=crossover_fn,
+            mutate_fn=mutate_fn,
+            offspring_mode=offspring_mode,
+        )
+        next_generation.append(children[0])
         if len(next_generation) < len(population):
-            next_generation.append(mutate_fn(child_b, config.mutation_rate, rng))
+            next_generation.append(children[1])
 
     return next_generation
+
+
+def _produce_offspring(
+    parent_a: list[int],
+    parent_b: list[int],
+    prices: list[int],
+    target_sum: int,
+    config: GeneticAlgorithmConfig,
+    rng: Random,
+    crossover_fn: CrossoverFunction,
+    mutate_fn: MutationFunction,
+    offspring_mode: str,
+) -> list[list[int]]:
+    if offspring_mode == "four_children_select_two":
+        if rng.random() < config.crossover_rate:
+            child_a, child_b = crossover_fn(parent_a, parent_b, rng)
+            child_c, child_d = crossover_fn(parent_a, parent_b, rng)
+        else:
+            child_a, child_b = parent_a[:], parent_b[:]
+            child_c, child_d = parent_a[:], parent_b[:]
+        children = [
+            mutate_fn(child_a, config.mutation_rate, rng),
+            mutate_fn(child_b, config.mutation_rate, rng),
+            mutate_fn(child_c, config.mutation_rate, rng),
+            mutate_fn(child_d, config.mutation_rate, rng),
+        ]
+        children.sort(key=lambda child: evaluate_vector(prices, target_sum, child))
+        return [children[0], children[1]]
+
+    if rng.random() < config.crossover_rate:
+        child_a, child_b = crossover_fn(parent_a, parent_b, rng)
+    else:
+        child_a, child_b = parent_a[:], parent_b[:]
+
+    return [
+        mutate_fn(child_a, config.mutation_rate, rng),
+        mutate_fn(child_b, config.mutation_rate, rng),
+    ]
 
 
 def _apply_nga_two_point(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
+    prices: list[int],
+    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> list[list[int]]:
     return _build_next_population(
         population,
         evaluations,
+        prices,
+        target_sum,
         config,
         rng,
         crossover_two_points,
@@ -248,11 +305,13 @@ def _apply_nga_elite_heavy_mutation(
 def _apply_nga_intervention(
     population: list[list[int]],
     evaluations: list[tuple[int, int]],
+    prices: list[int],
+    target_sum: int,
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> list[list[int]]:
     if config.nga_mode == "two_point":
-        return _apply_nga_two_point(population, evaluations, config, rng)
+        return _apply_nga_two_point(population, evaluations, prices, target_sum, config, rng)
     if config.nga_mode == "elite_heavy_mutation":
         return _apply_nga_elite_heavy_mutation(population, evaluations, config, rng)
     return population
@@ -299,15 +358,17 @@ def _copy_population(population: list[list[int]]) -> list[list[int]]:
     return [vector[:] for vector in population]
 
 
-def _resolve_crossover_fn(operator_type: OperatorType) -> CrossoverFunction:
+def _resolve_crossover_fn(operator_type: CrossoverType) -> CrossoverFunction:
     if operator_type == "two_point":
         return crossover_two_points
     return crossover
 
 
-def _resolve_mutation_fn(operator_type: OperatorType) -> MutationFunction:
+def _resolve_mutation_fn(operator_type: MutationType) -> MutationFunction:
     if operator_type == "two_point":
         return mutate_two_points
+    if operator_type == "reverse":
+        return mutate_reverse
     return mutate
 
 
@@ -321,6 +382,7 @@ def _single_run(
     allow_nga: bool = False,
     crossover_fn: CrossoverFunction = crossover,
     mutate_fn: MutationFunction = mutate,
+    offspring_mode: str = "two_children",
 ) -> _SingleRunResult:
     current_population = (
         build_initial_population(len(prices), config.population_size, rng)
@@ -355,10 +417,13 @@ def _single_run(
         current_population = _build_next_population(
             current_population,
             evaluations,
+            prices,
+            target_sum,
             config,
             rng,
             crossover_fn,
             mutate_fn,
+            offspring_mode,
         )
         evaluations = _evaluate_population(current_population, prices, target_sum)
         current_best_vector, current_best_sum, current_best_difference = _best_from_population(
@@ -414,6 +479,8 @@ def _single_run(
                 nga_population = _apply_nga_intervention(
                     current_population,
                     evaluations,
+                    prices,
+                    target_sum,
                     config,
                     rng,
                 )
@@ -723,6 +790,7 @@ def _solve_two_stage_restart(
     stage2_used = False
     current_crossover_fn = crossover
     current_mutate_fn = mutate
+    current_offspring_mode = "two_children"
 
     while True:
         run = _single_run(
@@ -735,6 +803,7 @@ def _solve_two_stage_restart(
             allow_nga=False,
             crossover_fn=current_crossover_fn,
             mutate_fn=current_mutate_fn,
+            offspring_mode=current_offspring_mode,
         )
         total_generations += run.generations_used
 
@@ -790,10 +859,12 @@ def _solve_two_stage_restart(
                 stage = 2
                 current_crossover_fn = _resolve_crossover_fn(config.stage2_crossover_type)
                 current_mutate_fn = _resolve_mutation_fn(config.stage2_mutation_type)
+                current_offspring_mode = config.stage2_offspring_mode
                 continue
 
             current_crossover_fn = crossover
             current_mutate_fn = mutate
+            current_offspring_mode = "two_children"
             continue
 
         if (
