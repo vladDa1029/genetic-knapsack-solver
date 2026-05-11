@@ -4,6 +4,7 @@ import unittest
 from random import Random
 
 from genetic_knapsack_solver.ga import (
+    _build_restart_population,
     _produce_offspring,
     crossover,
     crossover_two_points,
@@ -45,6 +46,20 @@ class GeneticAlgorithmTests(unittest.TestCase):
 
         self.assertEqual(mutate_reverse(vector, 0.0, Random(1)), vector)
         self.assertEqual(mutate_reverse(vector, 1.0, Random(1)), [0, 1, 0, 1])
+
+    def test_restart_population_can_use_reverse_operator(self) -> None:
+        population = [[1, 1, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]]
+
+        restarted = _build_restart_population(
+            base_population=population,
+            elite_vector=[1, 1, 0, 0],
+            population_mode="elite_from_last_population",
+            mutation_type="reverse",
+            mutation_fraction=0.4,
+            rng=Random(1),
+        )
+
+        self.assertEqual(restarted, [[1, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]])
 
     def test_four_children_select_two_keeps_best_two_children(self) -> None:
         config = GeneticAlgorithmConfig(
@@ -457,6 +472,50 @@ class GeneticAlgorithmTests(unittest.TestCase):
                 generations=4,
                 stagnation=5,
             )
+
+    def test_five_stage_restart_requires_valid_multistage_config(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="five_stage_restart",
+            generations=5,
+            stagnation=5,
+            multistage_crossover_type="two_point",
+            multistage_mutation_type="two_point",
+            multistage_elite_count=2,
+        )
+
+        self.assertEqual(config.multistage_crossover_type, "two_point")
+        self.assertEqual(config.multistage_mutation_type, "two_point")
+        self.assertEqual(config.multistage_elite_count, 2)
+
+    def test_five_stage_restart_validates_elite_count(self) -> None:
+        with self.assertRaises(ValueError):
+            GeneticAlgorithmConfig(
+                solver_mode="five_stage_restart",
+                population_size=4,
+                generations=5,
+                stagnation=5,
+                multistage_elite_count=5,
+            )
+
+    def test_python_solver_rejects_five_stage_restart(self) -> None:
+        config = GeneticAlgorithmConfig(
+            solver_mode="five_stage_restart",
+            population_size=6,
+            generations=3,
+            stagnation=3,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Rust core"):
+            solve_with_genetic_algorithm(
+                prices=[4, 8],
+                target_sum=3,
+                config=config,
+                rng=Random(7),
+            )
+
+    def test_restart_mutation_type_must_be_supported(self) -> None:
+        with self.assertRaises(ValueError):
+            GeneticAlgorithmConfig(restart_mutation_type="rotate")  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

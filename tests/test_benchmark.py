@@ -8,11 +8,13 @@ from pathlib import Path
 
 from genetic_knapsack_solver.benchmark import (
     BenchmarkSettings,
+    CSV_FIELD_LABELS,
     _parse_algorithm_modes,
     _parse_population_stop_pairs,
     run_benchmark,
 )
 from genetic_knapsack_solver.generator import GENERATION_MODE_SUPERINCREASING_DISGUISED
+from genetic_knapsack_solver.rust_core import rust_core_available
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -25,7 +27,7 @@ class BenchmarkTests(unittest.TestCase):
     def test_parse_algorithm_modes(self) -> None:
         self.assertEqual(
             _parse_algorithm_modes(
-                "none,two_point,elite_heavy_mutation,staged_hypermutation,restart_rescue,two_stage_restart"
+                "none,two_point,elite_heavy_mutation,staged_hypermutation,restart_rescue,two_stage_restart,five_stage_restart"
             ),
             (
                 "none",
@@ -34,6 +36,7 @@ class BenchmarkTests(unittest.TestCase):
                 "staged_hypermutation",
                 "restart_rescue",
                 "two_stage_restart",
+                "five_stage_restart",
             ),
         )
 
@@ -185,6 +188,47 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn("Использований 2 этапа", markdown_text)
             self.assertIn("Two-stage restart: перенос элиты и отдельный 2 этап", markdown_text)
             self.assertIn("Схема потомков 2 этапа", markdown_text)
+
+    @unittest.skipUnless(rust_core_available(), "Rust core library is not built")
+    def test_benchmark_supports_five_stage_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "run"
+            result_dir = run_benchmark(
+                BenchmarkSettings(
+                    item_counts=(6,),
+                    repeats=1,
+                    generations=3,
+                    mutation_rate=0.0,
+                    crossover_rate=0.0,
+                    tournament_size=2,
+                    population_stop_pairs=((6, 3),),
+                    algorithm_modes=("five_stage_restart",),
+                    multistage_crossover_type="two_point",
+                    multistage_mutation_type="two_point",
+                    multistage_elite_count=2,
+                    generation_mode=GENERATION_MODE_SUPERINCREASING_DISGUISED,
+                    seed=888,
+                    output_dir=output_dir,
+                )
+            )
+
+            with (result_dir / "results.csv").open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(
+                rows[0][CSV_FIELD_LABELS["algorithm_mode"]],
+                "Five-stage restart: 5 этапов в Rust core",
+            )
+            self.assertEqual(rows[0][CSV_FIELD_LABELS["multistage_crossover_type"]], "two_point")
+            self.assertEqual(rows[0][CSV_FIELD_LABELS["multistage_mutation_type"]], "two_point")
+            self.assertEqual(rows[0][CSV_FIELD_LABELS["multistage_elite_count"]], "2")
+            self.assertIn(CSV_FIELD_LABELS["final_stage"], rows[0])
+            self.assertIn(CSV_FIELD_LABELS["stage_best_differences"], rows[0])
+
+            markdown_text = (result_dir / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("Five-stage restart: 5 этапов в Rust core", markdown_text)
+            self.assertIn("Средний финальный этап", markdown_text)
 
 
 if __name__ == "__main__":

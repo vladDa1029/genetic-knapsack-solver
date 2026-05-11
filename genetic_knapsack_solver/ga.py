@@ -6,7 +6,13 @@ from random import Random
 from typing import Callable
 
 from genetic_knapsack_solver.generator import dot_product
-from genetic_knapsack_solver.models import CrossoverType, GeneticAlgorithmConfig, GeneticAlgorithmResult, MutationType
+from genetic_knapsack_solver.models import (
+    CrossoverType,
+    GeneticAlgorithmConfig,
+    GeneticAlgorithmResult,
+    MutationType,
+    RestartMutationType,
+)
 
 
 CrossoverFunction = Callable[[list[int], list[int], Random], tuple[list[int], list[int]]]
@@ -566,6 +572,7 @@ def _build_restart_population(
     base_population: list[list[int]],
     elite_vector: list[int],
     population_mode: str,
+    mutation_type: RestartMutationType,
     mutation_fraction: float,
     rng: Random,
 ) -> list[list[int]]:
@@ -580,7 +587,13 @@ def _build_restart_population(
     for index, vector in enumerate(base_population):
         if index == elite_index:
             continue
-        restart_population.append(mutate_many_bits(vector, mutation_fraction, rng))
+        if mutation_type == "many_bits":
+            restarted_vector = mutate_many_bits(vector, mutation_fraction, rng)
+        elif mutation_type == "reverse":
+            restarted_vector = mutate_reverse(vector, 1.0, rng)
+        else:
+            raise ValueError(f"unsupported restart_mutation_type: {mutation_type}")
+        restart_population.append(restarted_vector)
 
     return restart_population
 
@@ -847,6 +860,7 @@ def _solve_two_stage_restart(
             base_population=run.population,
             elite_vector=run.best_vector,
             population_mode=config.restart_population_mode,
+            mutation_type=config.restart_mutation_type,
             mutation_fraction=config.restart_mutation_fraction,
             rng=rng,
         )
@@ -891,6 +905,8 @@ def solve_with_genetic_algorithm(
     config: GeneticAlgorithmConfig,
     rng: Random,
 ) -> GeneticAlgorithmResult:
+    if config.solver_mode == "five_stage_restart":
+        raise ValueError("five_stage_restart is implemented only in Rust core; use solve_with_rust_core")
     if config.solver_mode == "restart_rescue":
         return _solve_restart_rescue(
             prices=prices,

@@ -5,10 +5,12 @@ from typing import Literal
 
 
 NgaMode = Literal["none", "two_point", "elite_heavy_mutation", "staged_hypermutation"]
-SolverMode = Literal["classic", "restart_rescue", "two_stage_restart"]
+SolverMode = Literal["classic", "restart_rescue", "two_stage_restart", "five_stage_restart"]
 RestartPopulationMode = Literal["elite_from_last_population"]
+RestartMutationType = Literal["many_bits", "reverse"]
 CrossoverType = Literal["one_point", "two_point"]
 MutationType = Literal["one_point", "two_point", "reverse"]
+MultistageMutationType = Literal["one_point", "two_point"]
 Stage2OffspringMode = Literal["two_children", "four_children_select_two"]
 OperatorType = Literal["one_point", "two_point", "reverse"]
 
@@ -39,16 +41,26 @@ class GeneticAlgorithmConfig:
     restart_max_count: int | None = None
     rescue_min_mutated_bits_ratio: float = 0.4
     restart_population_mode: RestartPopulationMode = "elite_from_last_population"
+    restart_mutation_type: RestartMutationType = "many_bits"
     restart_mutation_fraction: float = 0.4
     stage2_crossover_type: CrossoverType = "two_point"
     stage2_mutation_type: MutationType = "two_point"
     stage2_offspring_mode: Stage2OffspringMode = "two_children"
+    multistage_crossover_type: CrossoverType = "one_point"
+    multistage_mutation_type: MultistageMutationType = "one_point"
+    multistage_elite_count: int = 1
 
     def __post_init__(self) -> None:
-        if self.solver_mode not in ("classic", "restart_rescue", "two_stage_restart"):
-            raise ValueError("solver_mode must be one of: classic, restart_rescue, two_stage_restart")
+        if self.solver_mode not in ("classic", "restart_rescue", "two_stage_restart", "five_stage_restart"):
+            raise ValueError(
+                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, five_stage_restart"
+            )
         if self.population_size < 2:
             raise ValueError("population_size must be at least 2")
+        if self.multistage_elite_count < 1:
+            raise ValueError("multistage_elite_count must be at least 1")
+        if self.multistage_elite_count > self.population_size:
+            raise ValueError("multistage_elite_count must not exceed population_size")
         if self.generations < 1:
             raise ValueError("generations must be at least 1")
         if self.stagnation < 1:
@@ -65,6 +77,8 @@ class GeneticAlgorithmConfig:
             )
         if self.restart_population_mode not in ("elite_from_last_population",):
             raise ValueError("restart_population_mode must be one of: elite_from_last_population")
+        if self.restart_mutation_type not in ("many_bits", "reverse"):
+            raise ValueError("restart_mutation_type must be one of: many_bits, reverse")
         if self.stage2_crossover_type not in ("one_point", "two_point"):
             raise ValueError("stage2_crossover_type must be one of: one_point, two_point")
         if self.stage2_mutation_type not in ("one_point", "two_point", "reverse"):
@@ -73,6 +87,10 @@ class GeneticAlgorithmConfig:
             raise ValueError(
                 "stage2_offspring_mode must be one of: two_children, four_children_select_two"
             )
+        if self.multistage_crossover_type not in ("one_point", "two_point"):
+            raise ValueError("multistage_crossover_type must be one of: one_point, two_point")
+        if self.multistage_mutation_type not in ("one_point", "two_point"):
+            raise ValueError("multistage_mutation_type must be one of: one_point, two_point")
         for name, value in (
             ("crossover_rate", self.crossover_rate),
             ("mutation_rate", self.mutation_rate),
@@ -113,13 +131,20 @@ class GeneticAlgorithmConfig:
                 raise ValueError("nga_mode is only available in classic solver_mode")
             if self.repeat_limit is not None:
                 raise ValueError("repeat_limit is only available in classic solver_mode")
-        else:
+        elif self.solver_mode == "two_stage_restart":
             if self.nga_mode != "none":
                 raise ValueError("nga_mode is not used in two_stage_restart solver_mode")
             if self.repeat_limit is not None:
                 raise ValueError("repeat_limit is not used in two_stage_restart solver_mode")
             if self.generations < self.stagnation:
                 raise ValueError("generations must be at least stagnation in two_stage_restart solver_mode")
+        else:
+            if self.nga_mode != "none":
+                raise ValueError("nga_mode is not used in five_stage_restart solver_mode")
+            if self.repeat_limit is not None:
+                raise ValueError("repeat_limit is not used in five_stage_restart solver_mode")
+            if self.generations < self.stagnation:
+                raise ValueError("generations must be at least stagnation in five_stage_restart solver_mode")
 
 
 @dataclass(slots=True)
@@ -141,3 +166,6 @@ class GeneticAlgorithmResult:
     stage2_used: bool = False
     stage1_best_differences: list[int] = field(default_factory=list)
     stage2_best_differences: list[int] = field(default_factory=list)
+    stage_run_counts: list[int] = field(default_factory=list)
+    stage_best_differences: list[int] = field(default_factory=list)
+    final_stage: int = 0

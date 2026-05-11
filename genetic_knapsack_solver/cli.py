@@ -11,11 +11,13 @@ from genetic_knapsack_solver.generator import (
     generate_problem,
 )
 from genetic_knapsack_solver.models import GeneticAlgorithmConfig
+from genetic_knapsack_solver.rust_core import solve_with_rust_core
 
 SOLVER_MODE_LABELS = {
     "classic": "Классический режим",
     "restart_rescue": "Режим рестартов и rescue",
     "two_stage_restart": "Двухэтапный каскад запусков с переносом элиты",
+    "five_stage_restart": "Five-stage restart (Rust core)",
 }
 
 NGA_MODE_LABELS = {
@@ -29,6 +31,11 @@ RESTART_POPULATION_MODE_LABELS = {
     "elite_from_last_population": "Элита прошлого запуска + сильная мутация остальных",
 }
 
+RESTART_MUTATION_TYPE_LABELS = {
+    "many_bits": "Сильная bit-flip мутация",
+    "reverse": "Разворот вектора",
+}
+
 CROSSOVER_TYPE_LABELS = {
     "one_point": "Одноточечный",
     "two_point": "Двухточечный",
@@ -38,6 +45,11 @@ MUTATION_TYPE_LABELS = {
     "one_point": "Одноточечная",
     "two_point": "Двухточечная",
     "reverse": "Разворот вектора",
+}
+
+MULTISTAGE_MUTATION_TYPE_LABELS = {
+    "one_point": "Одноточечная",
+    "two_point": "Двухточечная",
 }
 
 
@@ -162,6 +174,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Доля битов для сильной мутации между запусками two_stage_restart.",
     )
     parser.add_argument(
+        "--restart-mutation-type",
+        choices=tuple(RESTART_MUTATION_TYPE_LABELS),
+        default="many_bits",
+        help="Оператор мутации для restart-популяции two_stage_restart.",
+    )
+    parser.add_argument(
         "--stage2-crossover-type",
         choices=tuple(CROSSOVER_TYPE_LABELS),
         default="two_point",
@@ -178,6 +196,24 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=tuple(STAGE2_OFFSPRING_MODE_LABELS),
         default="two_children",
         help="РЎС…РµРјР° РїРѕСЃС‚СЂРѕРµРЅРёСЏ РїРѕС‚РѕРјРєРѕРІ РЅР° 2 СЌС‚Р°РїРµ two_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-crossover-type",
+        choices=tuple(CROSSOVER_TYPE_LABELS),
+        default="one_point",
+        help="Crossover type for five_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-mutation-type",
+        choices=tuple(MULTISTAGE_MUTATION_TYPE_LABELS),
+        default="one_point",
+        help="Mutation type for five_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-elite-count",
+        type=int,
+        default=1,
+        help="Elite count preserved between five_stage_restart stages.",
     )
     parser.add_argument(
         "--seed",
@@ -218,17 +254,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         restart_max_count=args.restart_max_count,
         rescue_min_mutated_bits_ratio=args.rescue_min_mutated_bits_ratio,
         restart_population_mode=args.restart_population_mode,
+        restart_mutation_type=args.restart_mutation_type,
         restart_mutation_fraction=args.restart_mutation_fraction,
         stage2_crossover_type=args.stage2_crossover_type,
         stage2_mutation_type=args.stage2_mutation_type,
         stage2_offspring_mode=args.stage2_offspring_mode,
+        multistage_crossover_type=args.multistage_crossover_type,
+        multistage_mutation_type=args.multistage_mutation_type,
+        multistage_elite_count=args.multistage_elite_count,
     )
-    result = solve_with_genetic_algorithm(
-        prices=problem.prices,
-        target_sum=problem.target_sum,
-        config=config,
-        rng=rng,
-    )
+    if config.solver_mode == "five_stage_restart":
+        result = solve_with_rust_core(
+            prices=problem.prices,
+            target_sum=problem.target_sum,
+            config=config,
+            rng=rng,
+        )
+    else:
+        result = solve_with_genetic_algorithm(
+            prices=problem.prices,
+            target_sum=problem.target_sum,
+            config=config,
+            rng=rng,
+        )
 
     print(f"Режим генерации: {GENERATION_MODE_LABELS[problem.generation_mode]}")
     print(f"Предметы: {', '.join(problem.items)}")
@@ -252,10 +300,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(f"Минимальная доля битов rescue: {config.rescue_min_mutated_bits_ratio}")
     print(f"Режим restart-популяции: {RESTART_POPULATION_MODE_LABELS[config.restart_population_mode]}")
+    print(f"Оператор restart-мутации: {RESTART_MUTATION_TYPE_LABELS[config.restart_mutation_type]}")
     print(f"Сила restart-мутации: {config.restart_mutation_fraction}")
     print(f"Кроссовер 2 этапа: {CROSSOVER_TYPE_LABELS[config.stage2_crossover_type]}")
     print(f"Мутация 2 этапа: {MUTATION_TYPE_LABELS[config.stage2_mutation_type]}")
     print(f"Схема потомков 2 этапа: {STAGE2_OFFSPRING_MODE_LABELS[config.stage2_offspring_mode]}")
+    print(f"Кроссовер five-stage: {CROSSOVER_TYPE_LABELS[config.multistage_crossover_type]}")
+    print(f"Мутация five-stage: {MULTISTAGE_MUTATION_TYPE_LABELS[config.multistage_mutation_type]}")
+    print(f"Элит five-stage: {config.multistage_elite_count}")
     print(f"Лучшее решение: {_format_vector(result.best_vector)}")
     print(f"Найденная сумма: {result.best_sum}")
     print(f"Fitness: {result.fitness}")
@@ -274,5 +326,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"2 этап использован: {'Да' if result.stage2_used else 'Нет'}")
     print(f"История differance 1 этапа: {result.stage1_best_differences}")
     print(f"История differance 2 этапа: {result.stage2_best_differences}")
+    print(f"Запуски five-stage по этапам: {result.stage_run_counts}")
+    print(f"История difference five-stage: {result.stage_best_differences}")
+    print(f"Финальный этап five-stage: {result.final_stage}")
     print(f"Причина остановки: {result.stop_reason}")
     return 0

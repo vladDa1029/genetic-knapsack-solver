@@ -36,10 +36,14 @@ struct GeneticAlgorithmConfig {
     restart_max_count: Option<usize>,
     rescue_min_mutated_bits_ratio: f64,
     restart_population_mode: String,
+    restart_mutation_type: String,
     restart_mutation_fraction: f64,
     stage2_crossover_type: String,
     stage2_mutation_type: String,
     stage2_offspring_mode: String,
+    multistage_crossover_type: String,
+    multistage_mutation_type: String,
+    multistage_elite_count: usize,
 }
 
 impl Default for GeneticAlgorithmConfig {
@@ -60,10 +64,14 @@ impl Default for GeneticAlgorithmConfig {
             restart_max_count: None,
             rescue_min_mutated_bits_ratio: 0.4,
             restart_population_mode: "elite_from_last_population".to_string(),
+            restart_mutation_type: "many_bits".to_string(),
             restart_mutation_fraction: 0.4,
             stage2_crossover_type: "two_point".to_string(),
             stage2_mutation_type: "two_point".to_string(),
             stage2_offspring_mode: "two_children".to_string(),
+            multistage_crossover_type: "one_point".to_string(),
+            multistage_mutation_type: "one_point".to_string(),
+            multistage_elite_count: 1,
         }
     }
 }
@@ -72,12 +80,21 @@ impl GeneticAlgorithmConfig {
     fn validate(&self) -> Result<(), String> {
         if !matches!(
             self.solver_mode.as_str(),
-            "classic" | "restart_rescue" | "two_stage_restart"
+            "classic" | "restart_rescue" | "two_stage_restart" | "five_stage_restart"
         ) {
-            return Err("solver_mode must be one of: classic, restart_rescue, two_stage_restart".to_string());
+            return Err(
+                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, five_stage_restart"
+                    .to_string(),
+            );
         }
         if self.population_size < 2 {
             return Err("population_size must be at least 2".to_string());
+        }
+        if self.multistage_elite_count < 1 {
+            return Err("multistage_elite_count must be at least 1".to_string());
+        }
+        if self.multistage_elite_count > self.population_size {
+            return Err("multistage_elite_count must not exceed population_size".to_string());
         }
         if self.generations < 1 {
             return Err("generations must be at least 1".to_string());
@@ -110,6 +127,9 @@ impl GeneticAlgorithmConfig {
         if self.restart_population_mode != "elite_from_last_population" {
             return Err("restart_population_mode must be one of: elite_from_last_population".to_string());
         }
+        if !matches!(self.restart_mutation_type.as_str(), "many_bits" | "reverse") {
+            return Err("restart_mutation_type must be one of: many_bits, reverse".to_string());
+        }
         if !matches!(self.stage2_crossover_type.as_str(), "one_point" | "two_point") {
             return Err("stage2_crossover_type must be one of: one_point, two_point".to_string());
         }
@@ -127,6 +147,12 @@ impl GeneticAlgorithmConfig {
                 "stage2_offspring_mode must be one of: two_children, four_children_select_two"
                     .to_string(),
             );
+        }
+        if !matches!(self.multistage_crossover_type.as_str(), "one_point" | "two_point") {
+            return Err("multistage_crossover_type must be one of: one_point, two_point".to_string());
+        }
+        if !matches!(self.multistage_mutation_type.as_str(), "one_point" | "two_point") {
+            return Err("multistage_mutation_type must be one of: one_point, two_point".to_string());
         }
         for (name, value) in [
             ("crossover_rate", self.crossover_rate),
@@ -208,6 +234,17 @@ impl GeneticAlgorithmConfig {
                     return Err("generations must be at least stagnation in two_stage_restart solver_mode".to_string());
                 }
             }
+            "five_stage_restart" => {
+                if self.nga_mode != "none" {
+                    return Err("nga_mode is not used in five_stage_restart solver_mode".to_string());
+                }
+                if self.repeat_limit.is_some() {
+                    return Err("repeat_limit is not used in five_stage_restart solver_mode".to_string());
+                }
+                if self.generations < self.stagnation {
+                    return Err("generations must be at least stagnation in five_stage_restart solver_mode".to_string());
+                }
+            }
             _ => {}
         }
 
@@ -250,6 +287,9 @@ struct GeneticAlgorithmResult {
     stage2_used: bool,
     stage1_best_differences: Vec<i64>,
     stage2_best_differences: Vec<i64>,
+    stage_run_counts: Vec<usize>,
+    stage_best_differences: Vec<i64>,
+    final_stage: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -725,6 +765,7 @@ fn single_run(
     crossover_kind: CrossoverKind,
     mutation_kind: MutationKind,
     offspring_mode: OffspringMode,
+    generation_limit: Option<usize>,
 ) -> SingleRunResult {
     let mut current_population = initial_population
         .unwrap_or_else(|| build_initial_population(prices.len(), config.population_size, rng));
@@ -753,8 +794,30 @@ fn single_run(
     }
 
     let mut no_improvement_streak = 0usize;
+    let mut generation = 0usize;
 
-    for generation in 1..=config.generations {
+    loop {
+        if generation_limit.is_some_and(|limit| generation >= limit) {
+            return SingleRunResult {
+                population: current_population,
+                best_vector,
+                best_sum,
+                difference: best_difference,
+                best_fitness,
+                generations_used: generation,
+                exact_match: best_difference == 0,
+                stop_reason: if best_difference == 0 {
+                    "exact_match".to_string()
+                } else {
+                    "generation_limit".to_string()
+                },
+                nga_used,
+                nga_trigger_generation,
+                nga_trigger_generations,
+            };
+        }
+
+        generation += 1;
         current_population = build_next_population(
             &current_population,
             &evaluations,
@@ -881,24 +944,6 @@ fn single_run(
             };
         }
     }
-
-    SingleRunResult {
-        population: current_population,
-        best_vector,
-        best_sum,
-        difference: best_difference,
-        best_fitness,
-        generations_used: config.generations,
-        exact_match: best_difference == 0,
-        stop_reason: if best_difference == 0 {
-            "exact_match".to_string()
-        } else {
-            "generation_limit".to_string()
-        },
-        nga_used,
-        nga_trigger_generation,
-        nga_trigger_generations,
-    }
 }
 
 fn build_rescue_population(
@@ -919,6 +964,7 @@ fn build_restart_population(
     base_population: &[Vec<u8>],
     elite_vector: &[u8],
     population_mode: &str,
+    mutation_type: &str,
     mutation_fraction: f64,
     rng: &mut Rng64,
 ) -> Result<Vec<Vec<u8>>, String> {
@@ -940,10 +986,72 @@ fn build_restart_population(
         if index == elite_index {
             continue;
         }
-        restart_population.push(mutate_many_bits(vector, mutation_fraction, rng));
+        let restarted_vector = match mutation_type {
+            "many_bits" => mutate_many_bits(vector, mutation_fraction, rng),
+            // Restart reverse is intentionally deterministic: it replaces the strong
+            // bit-flip restart operator with a full vector reversal for every non-elite.
+            "reverse" => mutate_reverse(vector, 1.0, rng),
+            _ => return Err(format!("unsupported restart_mutation_type: {mutation_type}")),
+        };
+        restart_population.push(restarted_vector);
     }
 
     Ok(restart_population)
+}
+
+fn split_reverse_halves(vector: &[u8]) -> Vec<u8> {
+    let mid = vector.len() / 2;
+    let mut mutated = Vec::with_capacity(vector.len());
+    mutated.extend(vector[..mid].iter().rev().copied());
+    mutated.extend(vector[mid..].iter().rev().copied());
+    mutated
+}
+
+fn swap_halves(vector: &[u8]) -> Vec<u8> {
+    let mid = vector.len() / 2;
+    let mut mutated = Vec::with_capacity(vector.len());
+    mutated.extend_from_slice(&vector[mid..]);
+    mutated.extend_from_slice(&vector[..mid]);
+    mutated
+}
+
+fn build_multistage_restart_population(
+    base_population: &[Vec<u8>],
+    prices: &[i64],
+    target_sum: i64,
+    elite_count: usize,
+    next_stage: usize,
+    rng: &mut Rng64,
+) -> Vec<Vec<u8>> {
+    if base_population.is_empty() {
+        return Vec::new();
+    }
+
+    let evaluations = evaluate_population(base_population, prices, target_sum);
+    let ranked_indices = rank_population_indices(&evaluations);
+    let elite_count = elite_count.min(base_population.len());
+    let elite_indices: HashSet<usize> = ranked_indices.iter().take(elite_count).copied().collect();
+    let mut next_population = Vec::with_capacity(base_population.len());
+
+    for index in ranked_indices.iter().take(elite_count) {
+        next_population.push(base_population[*index].clone());
+    }
+
+    for (index, vector) in base_population.iter().enumerate() {
+        if elite_indices.contains(&index) {
+            continue;
+        }
+        let restarted_vector = match next_stage {
+            2 => split_reverse_halves(vector),
+            3 => swap_halves(vector),
+            4 => mutate_many_bits(vector, 0.60, rng),
+            5 => mutate_many_bits(vector, 0.80, rng),
+            _ => vector.to_vec(),
+        };
+        next_population.push(restarted_vector);
+    }
+
+    next_population
 }
 
 fn choose_better_run(first: &SingleRunResult, second: &SingleRunResult) -> SingleRunResult {
@@ -990,7 +1098,36 @@ fn build_result(
         stage2_used,
         stage1_best_differences,
         stage2_best_differences,
+        stage_run_counts: Vec::new(),
+        stage_best_differences: Vec::new(),
+        final_stage: 0,
     }
+}
+
+fn build_result_with_stage_metadata(
+    run: SingleRunResult,
+    generations_used: usize,
+    stop_reason: &str,
+    stage_run_counts: Vec<usize>,
+    stage_best_differences: Vec<i64>,
+    final_stage: usize,
+) -> GeneticAlgorithmResult {
+    let mut result = build_result(
+        run,
+        generations_used,
+        stop_reason,
+        0,
+        false,
+        0,
+        0,
+        false,
+        Vec::new(),
+        Vec::new(),
+    );
+    result.stage_run_counts = stage_run_counts;
+    result.stage_best_differences = stage_best_differences;
+    result.final_stage = final_stage;
+    result
 }
 
 fn solve_restart_rescue(
@@ -1010,6 +1147,7 @@ fn solve_restart_rescue(
         CrossoverKind::OnePoint,
         MutationKind::OnePoint,
         OffspringMode::TwoChildren,
+        Some(config.generations),
     );
 
     if matches!(run_0.stop_reason.as_str(), "exact_match" | "generation_limit") {
@@ -1062,6 +1200,7 @@ fn solve_restart_rescue(
             CrossoverKind::OnePoint,
             MutationKind::OnePoint,
             OffspringMode::TwoChildren,
+            Some(config.generations),
         );
         total_generations += run_i.generations_used;
 
@@ -1102,6 +1241,7 @@ fn solve_restart_rescue(
             CrossoverKind::OnePoint,
             MutationKind::OnePoint,
             OffspringMode::TwoChildren,
+            Some(config.generations),
         );
         total_generations += rescue_run.generations_used;
 
@@ -1187,6 +1327,72 @@ fn resolve_offspring_mode(operator_type: &str) -> OffspringMode {
     }
 }
 
+fn solve_five_stage_restart(
+    prices: &[i64],
+    target_sum: i64,
+    config: &GeneticAlgorithmConfig,
+    rng: &mut Rng64,
+) -> Result<GeneticAlgorithmResult, String> {
+    let crossover_kind = resolve_crossover_kind(&config.multistage_crossover_type);
+    let mutation_kind = resolve_mutation_kind(&config.multistage_mutation_type);
+    let mut current_population = None;
+    let mut total_generations = 0usize;
+    let mut stage_run_counts = Vec::with_capacity(5);
+    let mut stage_best_differences = Vec::with_capacity(5);
+
+    for stage in 1..=5 {
+        let run = single_run(
+            prices,
+            target_sum,
+            config,
+            rng,
+            current_population.take(),
+            true,
+            false,
+            crossover_kind,
+            mutation_kind,
+            OffspringMode::TwoChildren,
+            None,
+        );
+        total_generations += run.generations_used;
+        stage_run_counts.push(1);
+        stage_best_differences.push(run.difference);
+
+        if run.stop_reason == "exact_match" {
+            return Ok(build_result_with_stage_metadata(
+                run,
+                total_generations,
+                "exact_match",
+                stage_run_counts,
+                stage_best_differences,
+                stage,
+            ));
+        }
+
+        if stage == 5 {
+            return Ok(build_result_with_stage_metadata(
+                run,
+                total_generations,
+                "stagnation",
+                stage_run_counts,
+                stage_best_differences,
+                stage,
+            ));
+        }
+
+        current_population = Some(build_multistage_restart_population(
+            &run.population,
+            prices,
+            target_sum,
+            config.multistage_elite_count,
+            stage + 1,
+            rng,
+        ));
+    }
+
+    Err("five_stage_restart finished without a terminal stage".to_string())
+}
+
 fn solve_two_stage_restart(
     prices: &[i64],
     target_sum: i64,
@@ -1222,6 +1428,7 @@ fn solve_two_stage_restart(
             current_crossover_kind,
             current_mutation_kind,
             current_offspring_mode,
+            Some(config.generations),
         );
         total_generations += run.generations_used;
 
@@ -1270,6 +1477,7 @@ fn solve_two_stage_restart(
             &run.population,
             &run.best_vector,
             &config.restart_population_mode,
+            &config.restart_mutation_type,
             config.restart_mutation_fraction,
             rng,
         )?);
@@ -1332,6 +1540,12 @@ fn solve_with_genetic_algorithm(request: SolveRequest) -> Result<GeneticAlgorith
             &request.config,
             &mut rng,
         ),
+        "five_stage_restart" => solve_five_stage_restart(
+            &request.prices,
+            request.target_sum,
+            &request.config,
+            &mut rng,
+        ),
         _ => {
             let run = single_run(
                 &request.prices,
@@ -1344,6 +1558,7 @@ fn solve_with_genetic_algorithm(request: SolveRequest) -> Result<GeneticAlgorith
                 CrossoverKind::OnePoint,
                 MutationKind::OnePoint,
                 OffspringMode::TwoChildren,
+                Some(request.config.generations),
             );
             let generations_used = run.generations_used;
             let stop_reason = if run.stop_reason == "stagnation_limit" {
@@ -1365,6 +1580,56 @@ fn solve_with_genetic_algorithm(request: SolveRequest) -> Result<GeneticAlgorith
                 Vec::new(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_reverse_halves_reverses_each_half() {
+        assert_eq!(
+            split_reverse_halves(&[1, 0, 1, 1, 0]),
+            vec![0, 1, 0, 1, 1]
+        );
+    }
+
+    #[test]
+    fn swap_halves_moves_right_half_first() {
+        assert_eq!(swap_halves(&[1, 0, 1, 1, 0]), vec![1, 1, 0, 1, 0]);
+    }
+
+    #[test]
+    fn multistage_population_preserves_multiple_elites() {
+        let population = vec![
+            vec![1, 0, 0],
+            vec![0, 1, 0],
+            vec![0, 0, 1],
+            vec![1, 1, 1],
+        ];
+        let mut rng = Rng64::new(1);
+        let restarted =
+            build_multistage_restart_population(&population, &[10, 7, 3], 10, 2, 2, &mut rng);
+
+        assert_eq!(restarted[0], vec![1, 0, 0]);
+        assert_eq!(restarted[1], vec![0, 1, 0]);
+        assert_eq!(restarted.len(), population.len());
+    }
+
+    #[test]
+    fn multistage_population_applies_sixty_and_eighty_percent_mutations() {
+        let population = vec![vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0], vec![0; 10], vec![0; 10]];
+        let prices = vec![1; 10];
+        let mut rng = Rng64::new(1);
+        let stage4 = build_multistage_restart_population(&population, &prices, 1, 1, 4, &mut rng);
+        let mut rng = Rng64::new(1);
+        let stage5 = build_multistage_restart_population(&population, &prices, 1, 1, 5, &mut rng);
+
+        assert_eq!(stage4[1].iter().filter(|bit| **bit == 1).count(), 6);
+        assert_eq!(stage4[2].iter().filter(|bit| **bit == 1).count(), 6);
+        assert_eq!(stage5[1].iter().filter(|bit| **bit == 1).count(), 8);
+        assert_eq!(stage5[2].iter().filter(|bit| **bit == 1).count(), 8);
     }
 }
 

@@ -20,12 +20,15 @@ from genetic_knapsack_solver.generator import (
 from genetic_knapsack_solver.models import (
     CrossoverType,
     GeneticAlgorithmConfig,
+    MultistageMutationType,
     MutationType,
     NgaMode,
     ProblemInstance,
+    RestartMutationType,
     RestartPopulationMode,
     Stage2OffspringMode,
 )
+from genetic_knapsack_solver.rust_core import solve_with_rust_core
 
 BenchmarkMode = Literal[
     "none",
@@ -34,6 +37,7 @@ BenchmarkMode = Literal[
     "staged_hypermutation",
     "restart_rescue",
     "two_stage_restart",
+    "five_stage_restart",
 ]
 
 ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
@@ -43,6 +47,7 @@ ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
     "staged_hypermutation": "NGA-3: staged hypermutation в точках стагнации",
     "restart_rescue": "Restart rescue: полные рестарты и rescue-этап",
     "two_stage_restart": "Two-stage restart: перенос элиты и отдельный 2 этап",
+    "five_stage_restart": "Five-stage restart: 5 этапов в Rust core",
 }
 
 STOP_REASON_LABELS = {
@@ -87,15 +92,22 @@ CSV_FIELD_LABELS = {
     "restart_count": "Количество рестартов",
     "rescue_used": "Rescue использован",
     "restart_population_mode": "Режим restart-популяции",
+    "restart_mutation_type": "Оператор restart-мутации",
     "restart_mutation_fraction": "Сила restart-мутации",
     "stage2_crossover_type": "Кроссовер 2 этапа",
     "stage2_mutation_type": "Мутация 2 этапа",
     "stage2_offspring_mode": "Схема потомков 2 этапа",
+    "multistage_crossover_type": "Кроссовер five-stage",
+    "multistage_mutation_type": "Мутация five-stage",
+    "multistage_elite_count": "Элит five-stage",
     "stage1_run_count": "Запусков 1 этапа",
     "stage2_run_count": "Запусков 2 этапа",
     "stage2_used": "2 этап использован",
     "stage1_best_differences": "История difference 1 этапа",
     "stage2_best_differences": "История difference 2 этапа",
+    "stage_run_counts": "Запуски five-stage по этапам",
+    "stage_best_differences": "История difference five-stage",
+    "final_stage": "Финальный этап five-stage",
     "stop_reason": "Причина остановки",
     "elapsed_seconds": "Время выполнения (сек)",
     "status": "Статус",
@@ -129,10 +141,14 @@ class BenchmarkSettings:
     restart_max_count: int | None = None
     rescue_min_mutated_bits_ratio: float = 0.4
     restart_population_mode: RestartPopulationMode = "elite_from_last_population"
+    restart_mutation_type: RestartMutationType = "many_bits"
     restart_mutation_fraction: float = 0.4
     stage2_crossover_type: CrossoverType = "two_point"
     stage2_mutation_type: MutationType = "two_point"
     stage2_offspring_mode: Stage2OffspringMode = "two_children"
+    multistage_crossover_type: CrossoverType = "one_point"
+    multistage_mutation_type: MultistageMutationType = "one_point"
+    multistage_elite_count: int = 1
     generation_mode: str = GENERATION_MODE_SUPERINCREASING_DISGUISED
     seed: int = 42
     output_root: Path = Path("benchmark_results")
@@ -159,10 +175,14 @@ class BenchmarkRecord:
     restart_max_count: int | None = None
     rescue_min_mutated_bits_ratio: float = 0.4
     restart_population_mode: str = "elite_from_last_population"
+    restart_mutation_type: str = "many_bits"
     restart_mutation_fraction: float = 0.4
     stage2_crossover_type: str = "two_point"
     stage2_mutation_type: str = "two_point"
     stage2_offspring_mode: str = "two_children"
+    multistage_crossover_type: str = "one_point"
+    multistage_mutation_type: str = "one_point"
+    multistage_elite_count: int = 1
     problem_seed: int = 0
     solver_seed: int = 0
     target_sum: int | None = None
@@ -183,6 +203,9 @@ class BenchmarkRecord:
     stage2_used: bool | None = None
     stage1_best_differences: str | None = None
     stage2_best_differences: str | None = None
+    stage_run_counts: str | None = None
+    stage_best_differences: str | None = None
+    final_stage: int | None = None
     stop_reason: str = "failed"
     elapsed_seconds: float | None = None
     status: str = "failed"
@@ -328,6 +351,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Доля битов для сильной мутации между запусками two_stage_restart.",
     )
     parser.add_argument(
+        "--restart-mutation-type",
+        choices=("many_bits", "reverse"),
+        default="many_bits",
+        help="Оператор мутации для restart-популяции two_stage_restart.",
+    )
+    parser.add_argument(
         "--stage2-crossover-type",
         choices=("one_point", "two_point"),
         default="two_point",
@@ -344,6 +373,24 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("two_children", "four_children_select_two"),
         default="two_children",
         help="РЎС…РµРјР° РїРѕСЃС‚СЂРѕРµРЅРёСЏ РїРѕС‚РѕРјРєРѕРІ РЅР° 2 СЌС‚Р°РїРµ two_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-crossover-type",
+        choices=("one_point", "two_point"),
+        default="one_point",
+        help="Тип кроссовера для five_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-mutation-type",
+        choices=("one_point", "two_point"),
+        default="one_point",
+        help="Тип мутации для five_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-elite-count",
+        type=int,
+        default=1,
+        help="Количество элитных особей между этапами five_stage_restart.",
     )
     parser.add_argument(
         "--seed",
@@ -551,10 +598,14 @@ def _records_payload(
                 "restart_max_count": settings.restart_max_count,
                 "rescue_min_mutated_bits_ratio": settings.rescue_min_mutated_bits_ratio,
                 "restart_population_mode": settings.restart_population_mode,
+                "restart_mutation_type": settings.restart_mutation_type,
                 "restart_mutation_fraction": settings.restart_mutation_fraction,
                 "stage2_crossover_type": settings.stage2_crossover_type,
                 "stage2_mutation_type": settings.stage2_mutation_type,
                 "stage2_offspring_mode": settings.stage2_offspring_mode,
+                "multistage_crossover_type": settings.multistage_crossover_type,
+                "multistage_mutation_type": settings.multistage_mutation_type,
+                "multistage_elite_count": settings.multistage_elite_count,
                 "generation_mode": settings.generation_mode,
                 "seed": settings.seed,
                 "resume": settings.resume,
@@ -586,10 +637,14 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "restart_max_count",
         "rescue_min_mutated_bits_ratio",
         "restart_population_mode",
+        "restart_mutation_type",
         "restart_mutation_fraction",
         "stage2_crossover_type",
         "stage2_mutation_type",
         "stage2_offspring_mode",
+        "multistage_crossover_type",
+        "multistage_mutation_type",
+        "multistage_elite_count",
         "target_sum",
         "hidden_vector",
         "best_vector",
@@ -608,6 +663,9 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "stage2_used",
         "stage1_best_differences",
         "stage2_best_differences",
+        "stage_run_counts",
+        "stage_best_differences",
+        "final_stage",
         "stop_reason",
         "elapsed_seconds",
         "status",
@@ -651,12 +709,14 @@ def _group_summary(records: list[BenchmarkRecord]) -> list[dict[str, Any]]:
         average_generations = None
         average_fitness = None
         average_restart_count = None
+        average_final_stage = None
         exact_rate = 0.0
         if completed_records:
             average_time = mean(float(record.elapsed_seconds or 0.0) for record in completed_records)
             average_generations = mean(int(record.generations_used or 0) for record in completed_records)
             average_fitness = mean(int(record.fitness or 0) for record in completed_records)
             average_restart_count = mean(int(record.restart_count or 0) for record in completed_records)
+            average_final_stage = mean(int(record.final_stage or 0) for record in completed_records)
             exact_rate = 100.0 * exact_matches / len(completed_records)
 
         summary_rows.append(
@@ -674,6 +734,7 @@ def _group_summary(records: list[BenchmarkRecord]) -> list[dict[str, Any]]:
                 "avg_fitness": average_fitness,
                 "avg_generations_used": average_generations,
                 "avg_restart_count": average_restart_count,
+                "avg_final_stage": average_final_stage,
                 "avg_elapsed_seconds": average_time,
             }
         )
@@ -714,10 +775,14 @@ def _write_summary(
         f"- Максимум рестартов restart_rescue: `{settings.restart_max_count if settings.restart_max_count is not None else 'без лимита'}`",
         f"- Минимальная доля rescue-мутации: `{settings.rescue_min_mutated_bits_ratio}`",
         f"- Режим restart-популяции: `{settings.restart_population_mode}`",
+        f"- Оператор restart-мутации: `{settings.restart_mutation_type}`",
         f"- Сила restart-мутации: `{settings.restart_mutation_fraction}`",
         f"- Кроссовер 2 этапа: `{settings.stage2_crossover_type}`",
         f"- Мутация 2 этапа: `{settings.stage2_mutation_type}`",
         f"- Схема потомков 2 этапа: `{settings.stage2_offspring_mode}`",
+        f"- Кроссовер five-stage: `{settings.multistage_crossover_type}`",
+        f"- Мутация five-stage: `{settings.multistage_mutation_type}`",
+        f"- Элит five-stage: `{settings.multistage_elite_count}`",
         f"- Базовый seed: `{settings.seed}`",
         "",
         "## Сводные результаты",
@@ -726,14 +791,15 @@ def _write_summary(
         f"- Всего запланированных прогонов: `{len(_iter_matrix(settings))}`",
         f"- Папка результатов: `{output_dir}`",
         "",
-        "| n | Режим алгоритма | Размер популяции | Лимит без улучшения | Завершённых прогонов | Точных совпадений | Использований NGA | Использований rescue | Использований 2 этапа | Доля точных совпадений % | Средний fitness | Среднее число поколений | Среднее число рестартов | Среднее время, сек |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| n | Режим алгоритма | Размер популяции | Лимит без улучшения | Завершённых прогонов | Точных совпадений | Использований NGA | Использований rescue | Использований 2 этапа | Доля точных совпадений % | Средний fitness | Среднее число поколений | Среднее число рестартов | Средний финальный этап | Среднее время, сек |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
 
     for row in summary_rows:
         avg_fitness = "n/a" if row["avg_fitness"] is None else f"{row['avg_fitness']:.2f}"
         avg_generations = "n/a" if row["avg_generations_used"] is None else f"{row['avg_generations_used']:.2f}"
         avg_restarts = "n/a" if row["avg_restart_count"] is None else f"{row['avg_restart_count']:.2f}"
+        avg_final_stage = "n/a" if row["avg_final_stage"] is None else f"{row['avg_final_stage']:.2f}"
         avg_elapsed = "n/a" if row["avg_elapsed_seconds"] is None else f"{row['avg_elapsed_seconds']:.6f}"
         lines.append(
             "| "
@@ -750,6 +816,7 @@ def _write_summary(
             f"{avg_fitness} | "
             f"{avg_generations} | "
             f"{avg_restarts} | "
+            f"{avg_final_stage} | "
             f"{avg_elapsed} |"
         )
 
@@ -790,6 +857,8 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
             solver_mode = "restart_rescue"
         elif algorithm_mode == "two_stage_restart":
             solver_mode = "two_stage_restart"
+        elif algorithm_mode == "five_stage_restart":
+            solver_mode = "five_stage_restart"
         else:
             solver_mode = "classic"
         nga_mode: NgaMode = algorithm_mode if algorithm_mode in {
@@ -828,18 +897,30 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 restart_max_count=settings.restart_max_count,
                 rescue_min_mutated_bits_ratio=settings.rescue_min_mutated_bits_ratio,
                 restart_population_mode=settings.restart_population_mode,
+                restart_mutation_type=settings.restart_mutation_type,
                 restart_mutation_fraction=settings.restart_mutation_fraction,
                 stage2_crossover_type=settings.stage2_crossover_type,
                 stage2_mutation_type=settings.stage2_mutation_type,
                 stage2_offspring_mode=settings.stage2_offspring_mode,
+                multistage_crossover_type=settings.multistage_crossover_type,
+                multistage_mutation_type=settings.multistage_mutation_type,
+                multistage_elite_count=settings.multistage_elite_count,
             )
             task_started_at = perf_counter()
-            result = solve_with_genetic_algorithm(
-                prices=problem.prices,
-                target_sum=problem.target_sum,
-                config=config,
-                rng=Random(solver_seed),
-            )
+            if config.solver_mode == "five_stage_restart":
+                result = solve_with_rust_core(
+                    prices=problem.prices,
+                    target_sum=problem.target_sum,
+                    config=config,
+                    seed=solver_seed,
+                )
+            else:
+                result = solve_with_genetic_algorithm(
+                    prices=problem.prices,
+                    target_sum=problem.target_sum,
+                    config=config,
+                    rng=Random(solver_seed),
+                )
             task_elapsed_seconds = perf_counter() - task_started_at
             record = BenchmarkRecord(
                 item_count=item_count,
@@ -859,10 +940,14 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 restart_max_count=settings.restart_max_count,
                 rescue_min_mutated_bits_ratio=settings.rescue_min_mutated_bits_ratio,
                 restart_population_mode=settings.restart_population_mode,
+                restart_mutation_type=settings.restart_mutation_type,
                 restart_mutation_fraction=settings.restart_mutation_fraction,
                 stage2_crossover_type=settings.stage2_crossover_type,
                 stage2_mutation_type=settings.stage2_mutation_type,
                 stage2_offspring_mode=settings.stage2_offspring_mode,
+                multistage_crossover_type=settings.multistage_crossover_type,
+                multistage_mutation_type=settings.multistage_mutation_type,
+                multistage_elite_count=settings.multistage_elite_count,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 target_sum=problem.target_sum,
@@ -883,6 +968,9 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_used=result.stage2_used,
                 stage1_best_differences=_format_vector(result.stage1_best_differences),
                 stage2_best_differences=_format_vector(result.stage2_best_differences),
+                stage_run_counts=_format_vector(result.stage_run_counts),
+                stage_best_differences=_format_vector(result.stage_best_differences),
+                final_stage=result.final_stage,
                 stop_reason=result.stop_reason,
                 elapsed_seconds=task_elapsed_seconds,
                 status="completed",
@@ -906,10 +994,14 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 restart_max_count=settings.restart_max_count,
                 rescue_min_mutated_bits_ratio=settings.rescue_min_mutated_bits_ratio,
                 restart_population_mode=settings.restart_population_mode,
+                restart_mutation_type=settings.restart_mutation_type,
                 restart_mutation_fraction=settings.restart_mutation_fraction,
                 stage2_crossover_type=settings.stage2_crossover_type,
                 stage2_mutation_type=settings.stage2_mutation_type,
                 stage2_offspring_mode=settings.stage2_offspring_mode,
+                multistage_crossover_type=settings.multistage_crossover_type,
+                multistage_mutation_type=settings.multistage_mutation_type,
+                multistage_elite_count=settings.multistage_elite_count,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 stop_reason="failed",
@@ -944,10 +1036,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         restart_max_count=args.restart_max_count,
         rescue_min_mutated_bits_ratio=args.rescue_min_mutated_bits_ratio,
         restart_population_mode=args.restart_population_mode,
+        restart_mutation_type=args.restart_mutation_type,
         restart_mutation_fraction=args.restart_mutation_fraction,
         stage2_crossover_type=args.stage2_crossover_type,
         stage2_mutation_type=args.stage2_mutation_type,
         stage2_offspring_mode=args.stage2_offspring_mode,
+        multistage_crossover_type=args.multistage_crossover_type,
+        multistage_mutation_type=args.multistage_mutation_type,
+        multistage_elite_count=args.multistage_elite_count,
         generation_mode=args.generation_mode,
         seed=args.seed,
         output_root=args.output_root,
@@ -963,10 +1059,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Максимум рестартов restart_rescue: {settings.restart_max_count if settings.restart_max_count is not None else 'без лимита'}")
     print(f"Минимальная доля rescue-мутации: {settings.rescue_min_mutated_bits_ratio}")
     print(f"Режим restart-популяции: {settings.restart_population_mode}")
+    print(f"Оператор restart-мутации: {settings.restart_mutation_type}")
     print(f"Сила restart-мутации: {settings.restart_mutation_fraction}")
     print(f"Кроссовер 2 этапа: {settings.stage2_crossover_type}")
     print(f"Мутация 2 этапа: {settings.stage2_mutation_type}")
     print(f"Схема потомков 2 этапа: {settings.stage2_offspring_mode}")
+    print(f"Кроссовер five-stage: {settings.multistage_crossover_type}")
+    print(f"Мутация five-stage: {settings.multistage_mutation_type}")
+    print(f"Элит five-stage: {settings.multistage_elite_count}")
     print(f"State-файл: {_state_path(output_dir)}")
     print(f"CSV-файл: {_csv_path(output_dir)}")
     print(f"Markdown-файл: {_summary_path(output_dir)}")

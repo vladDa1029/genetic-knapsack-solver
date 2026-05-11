@@ -49,6 +49,7 @@ CROSSOVER_RATE = 0.95
 MUTATION_RATE = 0.9
 TOURNAMENT_SIZE = 3
 RESTART_MUTATION_FRACTION = 0.45
+RESTART_MUTATION_TYPE = "many_bits"  # "many_bits" or "reverse"
 
 # Базовый seed. Для repeat_index и n из него детерминированно строятся problem_seed/solver_seed.
 SEED = 42
@@ -83,8 +84,8 @@ CSV_FIELDS = (
     "stagnation",
     "generations",
     "mutation_rate",
-    "crossover_rate",
-    "tournament_size",
+    "crossover_rate",z
+    "restart_mutation_type",
     "restart_mutation_fraction",
     "stage2_crossover_type",
     "stage2_mutation_type",
@@ -120,6 +121,7 @@ class StudyConfig:
     crossover_rate: float
     mutation_rate: float
     tournament_size: int
+    restart_mutation_type: str
     restart_mutation_fraction: float
     seed: int
     stage2_crossover_type: str
@@ -146,7 +148,9 @@ def build_output_dir() -> Path:
 
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
     items = "_".join(str(item) for item in ITEM_COUNTS)
-    return root / "benchmark_results" / f"{timestamp}_rust_best_items_{items}_r{REPEATS}"
+    return (
+        root / "benchmark_results" / f"{timestamp}_rust_best_items_{items}_r{REPEATS}"
+    )
 
 
 def build_config() -> StudyConfig:
@@ -156,6 +160,8 @@ def build_config() -> StudyConfig:
         raise ValueError("REPEATS must be >= 1")
     if PROCESSES < 1:
         raise ValueError("PROCESSES must be >= 1")
+    if RESTART_MUTATION_TYPE not in ("many_bits", "reverse"):
+        raise ValueError("RESTART_MUTATION_TYPE must be 'many_bits' or 'reverse'")
     return StudyConfig(
         item_counts=[int(item) for item in ITEM_COUNTS],
         repeats=int(REPEATS),
@@ -166,6 +172,7 @@ def build_config() -> StudyConfig:
         crossover_rate=float(CROSSOVER_RATE),
         mutation_rate=float(MUTATION_RATE),
         tournament_size=int(TOURNAMENT_SIZE),
+        restart_mutation_type=RESTART_MUTATION_TYPE,
         restart_mutation_fraction=float(RESTART_MUTATION_FRACTION),
         seed=int(SEED),
         stage2_crossover_type=STAGE2_CROSSOVER_TYPE,
@@ -189,7 +196,9 @@ def ensure_rust_core() -> None:
 
     manifest = repo_root() / "rust_core" / "Cargo.toml"
     print("Rust core is not built. Running cargo build --release...")
-    subprocess.run([cargo, "build", "--release", "--manifest-path", str(manifest)], check=True)
+    subprocess.run(
+        [cargo, "build", "--release", "--manifest-path", str(manifest)], check=True
+    )
     if not rust_core_available():
         raise RuntimeError("Rust core is still unavailable after cargo build")
 
@@ -253,10 +262,14 @@ def load_records(config: StudyConfig, item_count: int) -> dict[int, dict[str, An
     if not path.exists():
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return {int(record["repeat_index"]): record for record in payload.get("records", [])}
+    return {
+        int(record["repeat_index"]): record for record in payload.get("records", [])
+    }
 
 
-def write_csv(config: StudyConfig, item_count: int, records: list[dict[str, Any]]) -> None:
+def write_csv(
+    config: StudyConfig, item_count: int, records: list[dict[str, Any]]
+) -> None:
     with csv_path(config, item_count).open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=CSV_FIELDS)
         writer.writeheader()
@@ -274,13 +287,35 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "completed": len(completed),
         "exact": exact,
         "exact_rate": 100.0 * exact / len(completed) if completed else 0.0,
-        "avg_diff": statistics.mean(float(record["difference"]) for record in completed) if completed else None,
-        "median_diff": statistics.median(float(record["difference"]) for record in completed) if completed else None,
-        "avg_generations": statistics.mean(float(record["generations_used"]) for record in completed) if completed else None,
-        "avg_seconds": statistics.mean(float(record["elapsed_seconds"]) for record in completed) if completed else None,
+        "avg_diff": statistics.mean(float(record["difference"]) for record in completed)
+        if completed
+        else None,
+        "median_diff": statistics.median(
+            float(record["difference"]) for record in completed
+        )
+        if completed
+        else None,
+        "avg_generations": statistics.mean(
+            float(record["generations_used"]) for record in completed
+        )
+        if completed
+        else None,
+        "avg_seconds": statistics.mean(
+            float(record["elapsed_seconds"]) for record in completed
+        )
+        if completed
+        else None,
         "stage2_rate": 100.0 * stage2 / len(completed) if completed else 0.0,
-        "avg_stage1_runs": statistics.mean(float(record["stage1_run_count"]) for record in completed) if completed else None,
-        "avg_stage2_runs": statistics.mean(float(record["stage2_run_count"]) for record in completed) if completed else None,
+        "avg_stage1_runs": statistics.mean(
+            float(record["stage1_run_count"]) for record in completed
+        )
+        if completed
+        else None,
+        "avg_stage2_runs": statistics.mean(
+            float(record["stage2_run_count"]) for record in completed
+        )
+        if completed
+        else None,
     }
 
 
@@ -289,16 +324,22 @@ def fmt(value: float | None, digits: int = 2) -> str:
 
 
 def config_name(config: StudyConfig) -> str:
-    return f"rf{config.restart_mutation_fraction}_m{config.mutation_rate}_t{config.tournament_size}"
+    return (
+        f"rt{config.restart_mutation_type}_rf{config.restart_mutation_fraction}"
+        f"_m{config.mutation_rate}_t{config.tournament_size}"
+    )
 
 
-def write_summary(config: StudyConfig, item_count: int, records: list[dict[str, Any]], finished: bool) -> None:
+def write_summary(
+    config: StudyConfig, item_count: int, records: list[dict[str, Any]], finished: bool
+) -> None:
     summary = summarize_records(records)
     lines = [
         "# Сводка Rust-исследования",
         "",
         f"- n: `{item_count}`",
         f"- Конфигурация: `{config_name(config)}`",
+        f"- restart_mutation_type: `{config.restart_mutation_type}`",
         f"- restart_mutation_fraction: `{config.restart_mutation_fraction}`",
         f"- mutation_rate: `{config.mutation_rate}`",
         f"- tournament_size: `{config.tournament_size}`",
@@ -316,10 +357,17 @@ def write_summary(config: StudyConfig, item_count: int, records: list[dict[str, 
             f"{fmt(summary['avg_stage2_runs'])} |"
         ),
     ]
-    summary_path(config, item_count).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    summary_path(config, item_count).write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
 
 
-def persist(config: StudyConfig, item_count: int, records_by_repeat: dict[int, dict[str, Any]], finished: bool) -> None:
+def persist(
+    config: StudyConfig,
+    item_count: int,
+    records_by_repeat: dict[int, dict[str, Any]],
+    finished: bool,
+) -> None:
     """Сохраняет состояние после каждого повтора, чтобы долгий запуск можно было продолжить."""
 
     records = [records_by_repeat[index] for index in sorted(records_by_repeat)]
@@ -338,6 +386,7 @@ def persist(config: StudyConfig, item_count: int, records_by_repeat: dict[int, d
                 "crossover_rate": config.crossover_rate,
                 "mutation_rate": config.mutation_rate,
                 "tournament_size": config.tournament_size,
+                "restart_mutation_type": config.restart_mutation_type,
                 "restart_mutation_fraction": config.restart_mutation_fraction,
                 "stage2_crossover_type": config.stage2_crossover_type,
                 "stage2_mutation_type": config.stage2_mutation_type,
@@ -349,7 +398,9 @@ def persist(config: StudyConfig, item_count: int, records_by_repeat: dict[int, d
         "records": records,
         "issues": [record for record in records if record.get("status") != "completed"],
     }
-    state_path(config, item_count).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    state_path(config, item_count).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     write_csv(config, item_count, records)
     write_summary(config, item_count, records, finished)
 
@@ -378,6 +429,7 @@ def initialize_output(config: StudyConfig) -> None:
         "crossover_rate": config.crossover_rate,
         "mutation_rate": config.mutation_rate,
         "tournament_size": config.tournament_size,
+        "restart_mutation_type": config.restart_mutation_type,
         "restart_mutation_fraction": config.restart_mutation_fraction,
         "stage2_crossover_type": config.stage2_crossover_type,
         "stage2_mutation_type": config.stage2_mutation_type,
@@ -385,7 +437,9 @@ def initialize_output(config: StudyConfig) -> None:
         "generation_mode": config.generation_mode,
         "seed": config.seed,
     }
-    (config.output_dir / "study_config.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    (config.output_dir / "study_config.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     write_progress(config)
 
 
@@ -415,6 +469,7 @@ def run_item(config: StudyConfig, item_count: int) -> None:
             mutation_rate=config.mutation_rate,
             tournament_size=config.tournament_size,
             nga_mode="none",
+            restart_mutation_type=config.restart_mutation_type,
             restart_mutation_fraction=config.restart_mutation_fraction,
             stage2_crossover_type=config.stage2_crossover_type,
             stage2_mutation_type=config.stage2_mutation_type,
@@ -442,6 +497,7 @@ def run_item(config: StudyConfig, item_count: int) -> None:
                 "mutation_rate": config.mutation_rate,
                 "crossover_rate": config.crossover_rate,
                 "tournament_size": config.tournament_size,
+                "restart_mutation_type": config.restart_mutation_type,
                 "restart_mutation_fraction": config.restart_mutation_fraction,
                 "stage2_crossover_type": config.stage2_crossover_type,
                 "stage2_mutation_type": config.stage2_mutation_type,
@@ -465,7 +521,11 @@ def run_item(config: StudyConfig, item_count: int) -> None:
                 "reason": "",
             }
             records_by_repeat[repeat_index] = record
-            log(config, item_count, f"repeat={repeat_index} exact={result.exact_match} diff={result.difference} seconds={elapsed:.6f}")
+            log(
+                config,
+                item_count,
+                f"repeat={repeat_index} exact={result.exact_match} diff={result.difference} seconds={elapsed:.6f}",
+            )
         except Exception as error:
             elapsed = perf_counter() - started
             records_by_repeat[repeat_index] = {
@@ -481,6 +541,7 @@ def run_item(config: StudyConfig, item_count: int) -> None:
                 "mutation_rate": config.mutation_rate,
                 "crossover_rate": config.crossover_rate,
                 "tournament_size": config.tournament_size,
+                "restart_mutation_type": config.restart_mutation_type,
                 "restart_mutation_fraction": config.restart_mutation_fraction,
                 "stage2_crossover_type": config.stage2_crossover_type,
                 "stage2_mutation_type": config.stage2_mutation_type,
@@ -489,7 +550,11 @@ def run_item(config: StudyConfig, item_count: int) -> None:
                 "status": "failed",
                 "reason": str(error),
             }
-            log_error(config, item_count, f"repeat={repeat_index} failed: {error}\n{traceback.format_exc()}")
+            log_error(
+                config,
+                item_count,
+                f"repeat={repeat_index} failed: {error}\n{traceback.format_exc()}",
+            )
             persist(config, item_count, records_by_repeat, finished=False)
             raise
         persist(config, item_count, records_by_repeat, finished=False)
@@ -510,14 +575,21 @@ def collect(config: StudyConfig) -> tuple[list[dict[str, Any]], list[str], int]:
             continue
         payload = json.loads(path.read_text(encoding="utf-8"))
         records = payload.get("records", [])
-        completed = [record for record in records if record.get("status") == "completed"]
+        completed = [
+            record for record in records if record.get("status") == "completed"
+        ]
         failed = [record for record in records if record.get("status") != "completed"]
         total_completed += len(completed)
         if len(completed) != config.repeats:
-            issues.append(f"`n{item_count}`: completed records {len(completed)} / {config.repeats}")
+            issues.append(
+                f"`n{item_count}`: completed records {len(completed)} / {config.repeats}"
+            )
         if failed:
             issues.append(f"`n{item_count}`: failed records {len(failed)}")
-        if stderr_path(config, item_count).exists() and stderr_path(config, item_count).stat().st_size > 0:
+        if (
+            stderr_path(config, item_count).exists()
+            and stderr_path(config, item_count).stat().st_size > 0
+        ):
             issues.append(f"`n{item_count}`: non-empty stderr.log")
         if completed:
             summary = summarize_records(completed)
@@ -538,7 +610,9 @@ def write_progress(config: StudyConfig) -> None:
         f"- Завершено повторов: `{completed} / {total}`",
         f"- Найдено проблем: `{len(issues)}`",
     ]
-    (config.output_dir / "progress.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (config.output_dir / "progress.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
 
 
 def write_report(config: StudyConfig) -> None:
@@ -555,6 +629,7 @@ def write_report(config: StudyConfig) -> None:
         "- Решатель: `rust_core`",
         f"- Конфигурация: `{config_name(config)}`",
         f"- Метод 2 этапа: `{config.stage2_crossover_type}/{config.stage2_mutation_type}/{config.stage2_offspring_mode}`",
+        f"- restart_mutation_type: `{config.restart_mutation_type}`",
         f"- restart_mutation_fraction: `{config.restart_mutation_fraction}`",
         f"- mutation_rate: `{config.mutation_rate}`",
         f"- tournament_size: `{config.tournament_size}`",
@@ -590,8 +665,12 @@ def write_report(config: StudyConfig) -> None:
     if issues:
         lines.extend(f"- {issue}" for issue in issues)
     else:
-        lines.append("- Ошибок, пропущенных повторов и непустых stderr-логов не найдено.")
-    (config.output_dir / "comparison.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        lines.append(
+            "- Ошибок, пропущенных повторов и непустых stderr-логов не найдено."
+        )
+    (config.output_dir / "comparison.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
     write_progress(config)
 
 
@@ -613,7 +692,8 @@ def parent_main(config: StudyConfig) -> int:
     print(
         "Конфигурация: rust_core, two_stage_restart, "
         f"{config.stage2_crossover_type}/{config.stage2_mutation_type}/{config.stage2_offspring_mode}, "
-        f"rf={config.restart_mutation_fraction}, mutation={config.mutation_rate}, tournament={config.tournament_size}"
+        f"restart={config.restart_mutation_type}, rf={config.restart_mutation_fraction}, "
+        f"mutation={config.mutation_rate}, tournament={config.tournament_size}"
     )
 
     queue = list(config.item_counts)
@@ -623,9 +703,18 @@ def parent_main(config: StudyConfig) -> int:
     while queue or running:
         while queue and len(running) < config.processes:
             item_count = queue.pop(0)
-            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(item_count)])
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--worker",
+                    str(item_count),
+                ]
+            )
             running.append((item_count, process))
-            all_processes.append({"item_count": item_count, "pid": process.pid, "started_at": now_iso()})
+            all_processes.append(
+                {"item_count": item_count, "pid": process.pid, "started_at": now_iso()}
+            )
             (config.output_dir / "process_manifest.json").write_text(
                 json.dumps(all_processes, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -638,7 +727,9 @@ def parent_main(config: StudyConfig) -> int:
             if exit_code is None:
                 still_running.append((item_count, process))
             elif exit_code != 0:
-                print(f"Worker n={item_count} завершился с ошибкой, exit code {exit_code}")
+                print(
+                    f"Worker n={item_count} завершился с ошибкой, exit code {exit_code}"
+                )
         running = still_running
         write_progress(config)
         print((config.output_dir / "progress.md").read_text(encoding="utf-8").strip())
