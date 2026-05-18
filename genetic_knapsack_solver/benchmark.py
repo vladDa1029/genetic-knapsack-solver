@@ -21,6 +21,7 @@ from genetic_knapsack_solver.models import (
     CrossoverType,
     GeneticAlgorithmConfig,
     MultistageMutationType,
+    MultistageOffspringMode,
     MutationType,
     NgaMode,
     ProblemInstance,
@@ -99,7 +100,14 @@ CSV_FIELD_LABELS = {
     "stage2_offspring_mode": "Схема потомков 2 этапа",
     "multistage_crossover_type": "Кроссовер five-stage",
     "multistage_mutation_type": "Мутация five-stage",
+    "multistage_offspring_mode": "Схема потомков five-stage",
     "multistage_elite_count": "Элит five-stage",
+    "stage1_crossover_type": "Кроссовер 1 этапа two_stage",
+    "stage1_mutation_type": "Мутация 1 этапа two_stage",
+    "stage1_offspring_mode": "Схема потомков 1 этапа two_stage",
+    "stage2_restart_fraction": "Сила restart-мутации 2 этапа",
+    "multistage_stage4_fraction": "Доля мутации five-stage этап 4",
+    "multistage_stage5_fraction": "Доля мутации five-stage этап 5",
     "stage1_run_count": "Запусков 1 этапа",
     "stage2_run_count": "Запусков 2 этапа",
     "stage2_used": "2 этап использован",
@@ -148,7 +156,14 @@ class BenchmarkSettings:
     stage2_offspring_mode: Stage2OffspringMode = "two_children"
     multistage_crossover_type: CrossoverType = "one_point"
     multistage_mutation_type: MultistageMutationType = "one_point"
+    multistage_offspring_mode: MultistageOffspringMode = "two_children"
     multistage_elite_count: int = 1
+    stage1_crossover_type: CrossoverType = "one_point"
+    stage1_mutation_type: MutationType = "one_point"
+    stage1_offspring_mode: Stage2OffspringMode = "two_children"
+    stage2_restart_fraction: float = 0.40
+    multistage_stage4_fraction: float = 0.60
+    multistage_stage5_fraction: float = 0.80
     generation_mode: str = GENERATION_MODE_SUPERINCREASING_DISGUISED
     seed: int = 42
     output_root: Path = Path("benchmark_results")
@@ -182,7 +197,14 @@ class BenchmarkRecord:
     stage2_offspring_mode: str = "two_children"
     multistage_crossover_type: str = "one_point"
     multistage_mutation_type: str = "one_point"
+    multistage_offspring_mode: str = "two_children"
     multistage_elite_count: int = 1
+    stage1_crossover_type: str = "one_point"
+    stage1_mutation_type: str = "one_point"
+    stage1_offspring_mode: str = "two_children"
+    stage2_restart_fraction: float = 0.40
+    multistage_stage4_fraction: float = 0.60
+    multistage_stage5_fraction: float = 0.80
     problem_seed: int = 0
     solver_seed: int = 0
     target_sum: int | None = None
@@ -387,10 +409,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Тип мутации для five_stage_restart.",
     )
     parser.add_argument(
+        "--multistage-offspring-mode",
+        choices=("two_children", "four_children_select_two"),
+        default="two_children",
+        help="Схема построения потомков для five_stage_restart.",
+    )
+    parser.add_argument(
         "--multistage-elite-count",
         type=int,
         default=1,
         help="Количество элитных особей между этапами five_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage1-crossover-type",
+        choices=("one_point", "two_point"),
+        default="one_point",
+        help="Тип кроссовера на 1 этапе two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage1-mutation-type",
+        choices=("one_point", "two_point", "reverse"),
+        default="one_point",
+        help="Тип мутации на 1 этапе two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage1-offspring-mode",
+        choices=("two_children", "four_children_select_two"),
+        default="two_children",
+        help="Схема построения потомков на 1 этапе two_stage_restart.",
+    )
+    parser.add_argument(
+        "--stage2-restart-fraction",
+        type=float,
+        default=0.40,
+        help="Доля битов для restart-мутации при переходе в 2 этап two_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-stage4-fraction",
+        type=float,
+        default=0.60,
+        help="Доля случайной мутации на 4 этапе five_stage_restart.",
+    )
+    parser.add_argument(
+        "--multistage-stage5-fraction",
+        type=float,
+        default=0.80,
+        help="Доля случайной мутации на 5 этапе five_stage_restart.",
     )
     parser.add_argument(
         "--seed",
@@ -605,7 +669,14 @@ def _records_payload(
                 "stage2_offspring_mode": settings.stage2_offspring_mode,
                 "multistage_crossover_type": settings.multistage_crossover_type,
                 "multistage_mutation_type": settings.multistage_mutation_type,
+                "multistage_offspring_mode": settings.multistage_offspring_mode,
                 "multistage_elite_count": settings.multistage_elite_count,
+                "stage1_crossover_type": settings.stage1_crossover_type,
+                "stage1_mutation_type": settings.stage1_mutation_type,
+                "stage1_offspring_mode": settings.stage1_offspring_mode,
+                "stage2_restart_fraction": settings.stage2_restart_fraction,
+                "multistage_stage4_fraction": settings.multistage_stage4_fraction,
+                "multistage_stage5_fraction": settings.multistage_stage5_fraction,
                 "generation_mode": settings.generation_mode,
                 "seed": settings.seed,
                 "resume": settings.resume,
@@ -644,7 +715,14 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "stage2_offspring_mode",
         "multistage_crossover_type",
         "multistage_mutation_type",
+        "multistage_offspring_mode",
         "multistage_elite_count",
+        "stage1_crossover_type",
+        "stage1_mutation_type",
+        "stage1_offspring_mode",
+        "stage2_restart_fraction",
+        "multistage_stage4_fraction",
+        "multistage_stage5_fraction",
         "target_sum",
         "hidden_vector",
         "best_vector",
@@ -782,7 +860,14 @@ def _write_summary(
         f"- Схема потомков 2 этапа: `{settings.stage2_offspring_mode}`",
         f"- Кроссовер five-stage: `{settings.multistage_crossover_type}`",
         f"- Мутация five-stage: `{settings.multistage_mutation_type}`",
+        f"- Схема потомков five-stage: `{settings.multistage_offspring_mode}`",
         f"- Элит five-stage: `{settings.multistage_elite_count}`",
+        f"- Кроссовер 1 этапа two_stage: `{settings.stage1_crossover_type}`",
+        f"- Мутация 1 этапа two_stage: `{settings.stage1_mutation_type}`",
+        f"- Схема потомков 1 этапа two_stage: `{settings.stage1_offspring_mode}`",
+        f"- Сила restart-мутации 2 этапа: `{settings.stage2_restart_fraction}`",
+        f"- Доля мутации five-stage этап 4: `{settings.multistage_stage4_fraction}`",
+        f"- Доля мутации five-stage этап 5: `{settings.multistage_stage5_fraction}`",
         f"- Базовый seed: `{settings.seed}`",
         "",
         "## Сводные результаты",
@@ -904,10 +989,17 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_offspring_mode=settings.stage2_offspring_mode,
                 multistage_crossover_type=settings.multistage_crossover_type,
                 multistage_mutation_type=settings.multistage_mutation_type,
+                multistage_offspring_mode=settings.multistage_offspring_mode,
                 multistage_elite_count=settings.multistage_elite_count,
+                stage1_crossover_type=settings.stage1_crossover_type,
+                stage1_mutation_type=settings.stage1_mutation_type,
+                stage1_offspring_mode=settings.stage1_offspring_mode,
+                stage2_restart_fraction=settings.stage2_restart_fraction,
+                multistage_stage4_fraction=settings.multistage_stage4_fraction,
+                multistage_stage5_fraction=settings.multistage_stage5_fraction,
             )
             task_started_at = perf_counter()
-            if config.solver_mode == "five_stage_restart":
+            if config.solver_mode in ("five_stage_restart", "two_stage_restart"):
                 result = solve_with_rust_core(
                     prices=problem.prices,
                     target_sum=problem.target_sum,
@@ -947,7 +1039,14 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_offspring_mode=settings.stage2_offspring_mode,
                 multistage_crossover_type=settings.multistage_crossover_type,
                 multistage_mutation_type=settings.multistage_mutation_type,
+                multistage_offspring_mode=settings.multistage_offspring_mode,
                 multistage_elite_count=settings.multistage_elite_count,
+                stage1_crossover_type=settings.stage1_crossover_type,
+                stage1_mutation_type=settings.stage1_mutation_type,
+                stage1_offspring_mode=settings.stage1_offspring_mode,
+                stage2_restart_fraction=settings.stage2_restart_fraction,
+                multistage_stage4_fraction=settings.multistage_stage4_fraction,
+                multistage_stage5_fraction=settings.multistage_stage5_fraction,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 target_sum=problem.target_sum,
@@ -1001,7 +1100,14 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_offspring_mode=settings.stage2_offspring_mode,
                 multistage_crossover_type=settings.multistage_crossover_type,
                 multistage_mutation_type=settings.multistage_mutation_type,
+                multistage_offspring_mode=settings.multistage_offspring_mode,
                 multistage_elite_count=settings.multistage_elite_count,
+                stage1_crossover_type=settings.stage1_crossover_type,
+                stage1_mutation_type=settings.stage1_mutation_type,
+                stage1_offspring_mode=settings.stage1_offspring_mode,
+                stage2_restart_fraction=settings.stage2_restart_fraction,
+                multistage_stage4_fraction=settings.multistage_stage4_fraction,
+                multistage_stage5_fraction=settings.multistage_stage5_fraction,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 stop_reason="failed",
@@ -1043,7 +1149,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         stage2_offspring_mode=args.stage2_offspring_mode,
         multistage_crossover_type=args.multistage_crossover_type,
         multistage_mutation_type=args.multistage_mutation_type,
+        multistage_offspring_mode=args.multistage_offspring_mode,
         multistage_elite_count=args.multistage_elite_count,
+        stage1_crossover_type=args.stage1_crossover_type,
+        stage1_mutation_type=args.stage1_mutation_type,
+        stage1_offspring_mode=args.stage1_offspring_mode,
+        stage2_restart_fraction=args.stage2_restart_fraction,
+        multistage_stage4_fraction=args.multistage_stage4_fraction,
+        multistage_stage5_fraction=args.multistage_stage5_fraction,
         generation_mode=args.generation_mode,
         seed=args.seed,
         output_root=args.output_root,
@@ -1066,7 +1179,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Схема потомков 2 этапа: {settings.stage2_offspring_mode}")
     print(f"Кроссовер five-stage: {settings.multistage_crossover_type}")
     print(f"Мутация five-stage: {settings.multistage_mutation_type}")
+    print(f"Схема потомков five-stage: {settings.multistage_offspring_mode}")
     print(f"Элит five-stage: {settings.multistage_elite_count}")
+    print(f"Кроссовер 1 этапа two_stage: {settings.stage1_crossover_type}")
+    print(f"Мутация 1 этапа two_stage: {settings.stage1_mutation_type}")
+    print(f"Схема потомков 1 этапа two_stage: {settings.stage1_offspring_mode}")
+    print(f"Сила restart-мутации 2 этапа: {settings.stage2_restart_fraction}")
+    print(f"Доля мутации five-stage этап 4: {settings.multistage_stage4_fraction}")
+    print(f"Доля мутации five-stage этап 5: {settings.multistage_stage5_fraction}")
     print(f"State-файл: {_state_path(output_dir)}")
     print(f"CSV-файл: {_csv_path(output_dir)}")
     print(f"Markdown-файл: {_summary_path(output_dir)}")

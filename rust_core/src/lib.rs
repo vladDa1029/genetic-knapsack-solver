@@ -38,12 +38,19 @@ struct GeneticAlgorithmConfig {
     restart_population_mode: String,
     restart_mutation_type: String,
     restart_mutation_fraction: f64,
+    stage1_crossover_type: String,
+    stage1_mutation_type: String,
+    stage1_offspring_mode: String,
     stage2_crossover_type: String,
     stage2_mutation_type: String,
     stage2_offspring_mode: String,
+    stage2_restart_fraction: f64,
     multistage_crossover_type: String,
     multistage_mutation_type: String,
+    multistage_offspring_mode: String,
     multistage_elite_count: usize,
+    multistage_stage4_fraction: f64,
+    multistage_stage5_fraction: f64,
 }
 
 impl Default for GeneticAlgorithmConfig {
@@ -66,12 +73,19 @@ impl Default for GeneticAlgorithmConfig {
             restart_population_mode: "elite_from_last_population".to_string(),
             restart_mutation_type: "many_bits".to_string(),
             restart_mutation_fraction: 0.4,
+            stage1_crossover_type: "one_point".to_string(),
+            stage1_mutation_type: "one_point".to_string(),
+            stage1_offspring_mode: "two_children".to_string(),
             stage2_crossover_type: "two_point".to_string(),
             stage2_mutation_type: "two_point".to_string(),
             stage2_offspring_mode: "two_children".to_string(),
+            stage2_restart_fraction: 0.40,
             multistage_crossover_type: "one_point".to_string(),
             multistage_mutation_type: "one_point".to_string(),
+            multistage_offspring_mode: "two_children".to_string(),
             multistage_elite_count: 1,
+            multistage_stage4_fraction: 0.60,
+            multistage_stage5_fraction: 0.80,
         }
     }
 }
@@ -148,11 +162,38 @@ impl GeneticAlgorithmConfig {
                     .to_string(),
             );
         }
+        if !matches!(self.stage1_crossover_type.as_str(), "one_point" | "two_point") {
+            return Err("stage1_crossover_type must be one of: one_point, two_point".to_string());
+        }
+        if !matches!(
+            self.stage1_mutation_type.as_str(),
+            "one_point" | "two_point" | "reverse"
+        ) {
+            return Err("stage1_mutation_type must be one of: one_point, two_point, reverse".to_string());
+        }
+        if !matches!(
+            self.stage1_offspring_mode.as_str(),
+            "two_children" | "four_children_select_two"
+        ) {
+            return Err(
+                "stage1_offspring_mode must be one of: two_children, four_children_select_two"
+                    .to_string(),
+            );
+        }
         if !matches!(self.multistage_crossover_type.as_str(), "one_point" | "two_point") {
             return Err("multistage_crossover_type must be one of: one_point, two_point".to_string());
         }
         if !matches!(self.multistage_mutation_type.as_str(), "one_point" | "two_point") {
             return Err("multistage_mutation_type must be one of: one_point, two_point".to_string());
+        }
+        if !matches!(
+            self.multistage_offspring_mode.as_str(),
+            "two_children" | "four_children_select_two"
+        ) {
+            return Err(
+                "multistage_offspring_mode must be one of: two_children, four_children_select_two"
+                    .to_string(),
+            );
         }
         for (name, value) in [
             ("crossover_rate", self.crossover_rate),
@@ -163,6 +204,9 @@ impl GeneticAlgorithmConfig {
                 self.rescue_min_mutated_bits_ratio,
             ),
             ("restart_mutation_fraction", self.restart_mutation_fraction),
+            ("stage2_restart_fraction", self.stage2_restart_fraction),
+            ("multistage_stage4_fraction", self.multistage_stage4_fraction),
+            ("multistage_stage5_fraction", self.multistage_stage5_fraction),
         ] {
             if !(0.0..=1.0).contains(&value) {
                 return Err(format!("{name} must be between 0.0 and 1.0"));
@@ -1021,6 +1065,8 @@ fn build_multistage_restart_population(
     target_sum: i64,
     elite_count: usize,
     next_stage: usize,
+    stage4_fraction: f64,
+    stage5_fraction: f64,
     rng: &mut Rng64,
 ) -> Vec<Vec<u8>> {
     if base_population.is_empty() {
@@ -1044,8 +1090,8 @@ fn build_multistage_restart_population(
         let restarted_vector = match next_stage {
             2 => split_reverse_halves(vector),
             3 => swap_halves(vector),
-            4 => mutate_many_bits(vector, 0.60, rng),
-            5 => mutate_many_bits(vector, 0.80, rng),
+            4 => mutate_many_bits(vector, stage4_fraction, rng),
+            5 => mutate_many_bits(vector, stage5_fraction, rng),
             _ => vector.to_vec(),
         };
         next_population.push(restarted_vector);
@@ -1335,6 +1381,7 @@ fn solve_five_stage_restart(
 ) -> Result<GeneticAlgorithmResult, String> {
     let crossover_kind = resolve_crossover_kind(&config.multistage_crossover_type);
     let mutation_kind = resolve_mutation_kind(&config.multistage_mutation_type);
+    let offspring_mode = resolve_offspring_mode(&config.multistage_offspring_mode);
     let mut current_population = None;
     let mut total_generations = 0usize;
     let mut stage_run_counts = Vec::with_capacity(5);
@@ -1351,7 +1398,7 @@ fn solve_five_stage_restart(
             false,
             crossover_kind,
             mutation_kind,
-            OffspringMode::TwoChildren,
+            offspring_mode,
             None,
         );
         total_generations += run.generations_used;
@@ -1386,6 +1433,8 @@ fn solve_five_stage_restart(
             target_sum,
             config.multistage_elite_count,
             stage + 1,
+            config.multistage_stage4_fraction,
+            config.multistage_stage5_fraction,
             rng,
         ));
     }
@@ -1412,9 +1461,9 @@ fn solve_two_stage_restart(
     let mut stage1_run_count = 0usize;
     let mut stage2_run_count = 0usize;
     let mut stage2_used = false;
-    let mut current_crossover_kind = CrossoverKind::OnePoint;
-    let mut current_mutation_kind = MutationKind::OnePoint;
-    let mut current_offspring_mode = OffspringMode::TwoChildren;
+    let mut current_crossover_kind = resolve_crossover_kind(&config.stage1_crossover_type);
+    let mut current_mutation_kind = resolve_mutation_kind(&config.stage1_mutation_type);
+    let mut current_offspring_mode = resolve_offspring_mode(&config.stage1_offspring_mode);
 
     loop {
         let run = single_run(
@@ -1473,12 +1522,17 @@ fn solve_two_stage_restart(
 
         // Следующий run стартует не с полностью случайной популяции, а с элиты
         // последнего run и её сильных мутаций. Сила задаётся restart_mutation_fraction.
+        let restart_fraction = if stage == 1 {
+            config.restart_mutation_fraction
+        } else {
+            config.stage2_restart_fraction
+        };
         current_population = Some(build_restart_population(
             &run.population,
             &run.best_vector,
             &config.restart_population_mode,
             &config.restart_mutation_type,
-            config.restart_mutation_fraction,
+            restart_fraction,
             rng,
         )?);
 
@@ -1496,9 +1550,9 @@ fn solve_two_stage_restart(
                 continue;
             }
 
-            current_crossover_kind = CrossoverKind::OnePoint;
-            current_mutation_kind = MutationKind::OnePoint;
-            current_offspring_mode = OffspringMode::TwoChildren;
+            current_crossover_kind = resolve_crossover_kind(&config.stage1_crossover_type);
+            current_mutation_kind = resolve_mutation_kind(&config.stage1_mutation_type);
+            current_offspring_mode = resolve_offspring_mode(&config.stage1_offspring_mode);
             continue;
         }
 

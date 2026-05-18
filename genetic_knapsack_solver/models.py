@@ -11,6 +11,7 @@ RestartMutationType = Literal["many_bits", "reverse"]
 CrossoverType = Literal["one_point", "two_point"]
 MutationType = Literal["one_point", "two_point", "reverse"]
 MultistageMutationType = Literal["one_point", "two_point"]
+MultistageOffspringMode = Literal["two_children", "four_children_select_two"]
 Stage2OffspringMode = Literal["two_children", "four_children_select_two"]
 OperatorType = Literal["one_point", "two_point", "reverse"]
 
@@ -48,7 +49,14 @@ class GeneticAlgorithmConfig:
     stage2_offspring_mode: Stage2OffspringMode = "two_children"
     multistage_crossover_type: CrossoverType = "one_point"
     multistage_mutation_type: MultistageMutationType = "one_point"
+    multistage_offspring_mode: MultistageOffspringMode = "two_children"
     multistage_elite_count: int = 1
+    stage1_crossover_type: CrossoverType = "one_point"
+    stage1_mutation_type: MutationType = "one_point"
+    stage1_offspring_mode: Stage2OffspringMode = "two_children"
+    stage2_restart_fraction: float = 0.40
+    multistage_stage4_fraction: float = 0.60
+    multistage_stage5_fraction: float = 0.80
 
     def __post_init__(self) -> None:
         if self.solver_mode not in ("classic", "restart_rescue", "two_stage_restart", "five_stage_restart"):
@@ -91,12 +99,27 @@ class GeneticAlgorithmConfig:
             raise ValueError("multistage_crossover_type must be one of: one_point, two_point")
         if self.multistage_mutation_type not in ("one_point", "two_point"):
             raise ValueError("multistage_mutation_type must be one of: one_point, two_point")
+        if self.multistage_offspring_mode not in ("two_children", "four_children_select_two"):
+            raise ValueError(
+                "multistage_offspring_mode must be one of: two_children, four_children_select_two"
+            )
+        if self.stage1_crossover_type not in ("one_point", "two_point"):
+            raise ValueError("stage1_crossover_type must be one of: one_point, two_point")
+        if self.stage1_mutation_type not in ("one_point", "two_point", "reverse"):
+            raise ValueError("stage1_mutation_type must be one of: one_point, two_point, reverse")
+        if self.stage1_offspring_mode not in ("two_children", "four_children_select_two"):
+            raise ValueError(
+                "stage1_offspring_mode must be one of: two_children, four_children_select_two"
+            )
         for name, value in (
             ("crossover_rate", self.crossover_rate),
             ("mutation_rate", self.mutation_rate),
             ("nga_mutation_fraction", self.nga_mutation_fraction),
             ("rescue_min_mutated_bits_ratio", self.rescue_min_mutated_bits_ratio),
             ("restart_mutation_fraction", self.restart_mutation_fraction),
+            ("stage2_restart_fraction", self.stage2_restart_fraction),
+            ("multistage_stage4_fraction", self.multistage_stage4_fraction),
+            ("multistage_stage5_fraction", self.multistage_stage5_fraction),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be between 0.0 and 1.0")
