@@ -57,11 +57,15 @@ class GeneticAlgorithmConfig:
     stage2_restart_fraction: float = 0.40
     multistage_stage4_fraction: float = 0.60
     multistage_stage5_fraction: float = 0.80
+    hybrid_max_outer_restarts: int = 2
 
     def __post_init__(self) -> None:
-        if self.solver_mode not in ("classic", "restart_rescue", "two_stage_restart", "five_stage_restart"):
+        if self.solver_mode not in (
+            "classic", "restart_rescue", "two_stage_restart", "five_stage_restart", "hybrid_restart"
+        ):
             raise ValueError(
-                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, five_stage_restart"
+                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, "
+                "five_stage_restart, hybrid_restart"
             )
         if self.population_size < 2:
             raise ValueError("population_size must be at least 2")
@@ -161,13 +165,22 @@ class GeneticAlgorithmConfig:
                 raise ValueError("repeat_limit is not used in two_stage_restart solver_mode")
             if self.generations < self.stagnation:
                 raise ValueError("generations must be at least stagnation in two_stage_restart solver_mode")
-        else:
+        elif self.solver_mode == "five_stage_restart":
             if self.nga_mode != "none":
                 raise ValueError("nga_mode is not used in five_stage_restart solver_mode")
             if self.repeat_limit is not None:
                 raise ValueError("repeat_limit is not used in five_stage_restart solver_mode")
             if self.generations < self.stagnation:
                 raise ValueError("generations must be at least stagnation in five_stage_restart solver_mode")
+        else:  # hybrid_restart
+            if self.nga_mode != "none":
+                raise ValueError("nga_mode is not used in hybrid_restart solver_mode")
+            if self.repeat_limit is not None:
+                raise ValueError("repeat_limit is not used in hybrid_restart solver_mode")
+            if self.generations < self.stagnation:
+                raise ValueError("generations must be at least stagnation in hybrid_restart solver_mode")
+            if self.hybrid_max_outer_restarts < 1:
+                raise ValueError("hybrid_max_outer_restarts must be at least 1")
 
 
 @dataclass(slots=True)

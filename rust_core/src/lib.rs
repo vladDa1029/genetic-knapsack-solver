@@ -51,6 +51,7 @@ struct GeneticAlgorithmConfig {
     multistage_elite_count: usize,
     multistage_stage4_fraction: f64,
     multistage_stage5_fraction: f64,
+    hybrid_max_outer_restarts: usize,
 }
 
 impl Default for GeneticAlgorithmConfig {
@@ -86,6 +87,7 @@ impl Default for GeneticAlgorithmConfig {
             multistage_elite_count: 1,
             multistage_stage4_fraction: 0.60,
             multistage_stage5_fraction: 0.80,
+            hybrid_max_outer_restarts: 2,
         }
     }
 }
@@ -94,10 +96,10 @@ impl GeneticAlgorithmConfig {
     fn validate(&self) -> Result<(), String> {
         if !matches!(
             self.solver_mode.as_str(),
-            "classic" | "restart_rescue" | "two_stage_restart" | "five_stage_restart"
+            "classic" | "restart_rescue" | "two_stage_restart" | "five_stage_restart" | "hybrid_restart"
         ) {
             return Err(
-                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, five_stage_restart"
+                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, five_stage_restart, hybrid_restart"
                     .to_string(),
             );
         }
@@ -287,6 +289,20 @@ impl GeneticAlgorithmConfig {
                 }
                 if self.generations < self.stagnation {
                     return Err("generations must be at least stagnation in five_stage_restart solver_mode".to_string());
+                }
+            }
+            "hybrid_restart" => {
+                if self.nga_mode != "none" {
+                    return Err("nga_mode is not used in hybrid_restart solver_mode".to_string());
+                }
+                if self.repeat_limit.is_some() {
+                    return Err("repeat_limit is not used in hybrid_restart solver_mode".to_string());
+                }
+                if self.generations < self.stagnation {
+                    return Err("generations must be at least stagnation in hybrid_restart solver_mode".to_string());
+                }
+                if self.hybrid_max_outer_restarts == 0 {
+                    return Err("hybrid_max_outer_restarts must be at least 1".to_string());
                 }
             }
             _ => {}
@@ -1373,21 +1389,24 @@ fn resolve_offspring_mode(operator_type: &str) -> OffspringMode {
     }
 }
 
-fn solve_five_stage_restart(
+// Внутренняя функция: один полный цикл из 5 этапов, стартует с заданной популяции.
+// Возвращает (последний SingleRunResult, счётчики этапов, разницы этапов, суммарные поколения).
+fn run_five_stage_cycle(
     prices: &[i64],
     target_sum: i64,
     config: &GeneticAlgorithmConfig,
     rng: &mut Rng64,
-) -> Result<GeneticAlgorithmResult, String> {
+    initial_population: Option<Vec<Vec<u8>>>,
+) -> (SingleRunResult, Vec<usize>, Vec<i64>, usize) {
     let crossover_kind = resolve_crossover_kind(&config.multistage_crossover_type);
     let mutation_kind = resolve_mutation_kind(&config.multistage_mutation_type);
     let offspring_mode = resolve_offspring_mode(&config.multistage_offspring_mode);
-    let mut current_population = None;
+    let mut current_population = initial_population;
     let mut total_generations = 0usize;
     let mut stage_run_counts = Vec::with_capacity(5);
     let mut stage_best_differences = Vec::with_capacity(5);
 
-    for stage in 1..=5 {
+    for stage in 1..=5usize {
         let run = single_run(
             prices,
             target_sum,
@@ -1405,26 +1424,8 @@ fn solve_five_stage_restart(
         stage_run_counts.push(1);
         stage_best_differences.push(run.difference);
 
-        if run.stop_reason == "exact_match" {
-            return Ok(build_result_with_stage_metadata(
-                run,
-                total_generations,
-                "exact_match",
-                stage_run_counts,
-                stage_best_differences,
-                stage,
-            ));
-        }
-
-        if stage == 5 {
-            return Ok(build_result_with_stage_metadata(
-                run,
-                total_generations,
-                "stagnation",
-                stage_run_counts,
-                stage_best_differences,
-                stage,
-            ));
+        if run.stop_reason == "exact_match" || stage == 5 {
+            return (run, stage_run_counts, stage_best_differences, total_generations);
         }
 
         current_population = Some(build_multistage_restart_population(
@@ -1438,8 +1439,151 @@ fn solve_five_stage_restart(
             rng,
         ));
     }
+    unreachable!("run_five_stage_cycle loop exits via return")
+}
 
-    Err("five_stage_restart finished without a terminal stage".to_string())
+// Популяция для внешнего рестарта hybrid_restart:
+// - сохраняем elite_count лучших без изменений
+// - половину оставшихся заполняем сильной мутацией elite (many_bits с max fraction)
+// - остаток — свежий random
+fn build_hybrid_outer_restart_population(
+    final_population: &[Vec<u8>],
+    prices: &[i64],
+    target_sum: i64,
+    elite_count: usize,
+    mutation_fraction: f64,
+    rng: &mut Rng64,
+) -> Vec<Vec<u8>> {
+    let pop_size = final_population.len();
+    if pop_size == 0 {
+        return Vec::new();
+    }
+    let n = final_population[0].len();
+    let evaluations = evaluate_population(final_population, prices, target_sum);
+    let ranked = rank_population_indices(&evaluations);
+    let elite_count = elite_count.min(pop_size);
+
+    let mut new_pop: Vec<Vec<u8>> = Vec::with_capacity(pop_size);
+
+    // 1. Элита: лучшие решения переходят в следующий цикл без изменений
+    for &idx in ranked.iter().take(elite_count) {
+        new_pop.push(final_population[idx].clone());
+    }
+
+    // 2. Сильная мутация elite — уходим подальше от текущего локального оптимума,
+    //    но сохраняем «генетическую память» о лучших найденных решениях
+    let elite_vecs: Vec<&Vec<u8>> = ranked.iter().take(elite_count).map(|&i| &final_population[i]).collect();
+    let mutated_slots = (pop_size - elite_count) / 2;
+    for i in 0..mutated_slots {
+        let src = elite_vecs[i % elite_count];
+        new_pop.push(mutate_many_bits(src, mutation_fraction, rng));
+    }
+
+    // 3. Свежий random — инъекция полного разнообразия для избегания цикличного поиска
+    while new_pop.len() < pop_size {
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(if rng.random_f64() < 0.5 { 1u8 } else { 0u8 });
+        }
+        new_pop.push(v);
+    }
+
+    new_pop
+}
+
+fn solve_five_stage_restart(
+    prices: &[i64],
+    target_sum: i64,
+    config: &GeneticAlgorithmConfig,
+    rng: &mut Rng64,
+) -> Result<GeneticAlgorithmResult, String> {
+    let (run, stage_run_counts, stage_best_differences, total_generations) =
+        run_five_stage_cycle(prices, target_sum, config, rng, None);
+    let stop_reason = if run.stop_reason == "exact_match" { "exact_match" } else { "stagnation" };
+    let final_stage = stage_run_counts.len();
+    Ok(build_result_with_stage_metadata(
+        run,
+        total_generations,
+        stop_reason,
+        stage_run_counts,
+        stage_best_differences,
+        final_stage,
+    ))
+}
+
+// Гибридный алгоритм: объединяет five_stage_restart и two_stage_restart.
+//
+// Схема:
+//   1. Запустить полный цикл five_stage (5 этапов с нарастающей мутацией).
+//   2. Если найдено точное решение — вернуть результат.
+//   3. Если не найдено и outer_restart < hybrid_max_outer_restarts:
+//      a. Построить «ударную» популяцию из элиты + сильных мутаций + свежего random.
+//      b. Запустить five_stage снова с этой популяцией.
+//      c. Повторять до исчерпания outer_restart.
+//   4. Вернуть глобально лучший результат.
+//
+// Почему это лучше:
+//   - five_stage прекрасно ищет, но иногда застревает в глубоком локальном оптимуме.
+//   - two_stage умеет выбираться из ям через aggressive restart.
+//   - Здесь мы используем five_stage как основной движок, а outer_restart как механизм
+//     two_stage для принудительного escape из застрявших состояний.
+fn solve_hybrid_restart(
+    prices: &[i64],
+    target_sum: i64,
+    config: &GeneticAlgorithmConfig,
+    rng: &mut Rng64,
+) -> Result<GeneticAlgorithmResult, String> {
+    let max_outer_restarts = config.hybrid_max_outer_restarts;
+    let mut current_population: Option<Vec<Vec<u8>>> = None;
+    let mut total_generations = 0usize;
+    let mut best_run: Option<SingleRunResult> = None;
+    let mut all_stage_run_counts: Vec<usize> = Vec::new();
+    let mut all_stage_best_differences: Vec<i64> = Vec::new();
+
+    for outer_restart in 0..=max_outer_restarts {
+        let (run, stage_run_counts, stage_best_diffs, gens) =
+            run_five_stage_cycle(prices, target_sum, config, rng, current_population.take());
+        total_generations += gens;
+        all_stage_run_counts.extend_from_slice(&stage_run_counts);
+        all_stage_best_differences.extend_from_slice(&stage_best_diffs);
+
+        let exact = run.stop_reason == "exact_match";
+
+        // Обновляем глобально лучший результат
+        let is_better = best_run.as_ref().map_or(true, |b: &SingleRunResult| run.difference < b.difference);
+        let final_population = run.population.clone();
+        if is_better {
+            best_run = Some(run);
+        }
+
+        if exact || outer_restart == max_outer_restarts {
+            let final_run = best_run.expect("best_run is always set after first cycle");
+            let stop = if exact { "exact_match" } else { "stagnation" };
+            let final_stage = all_stage_run_counts.len();
+            return Ok(build_result_with_stage_metadata(
+                final_run,
+                total_generations,
+                stop,
+                all_stage_run_counts,
+                all_stage_best_differences,
+                final_stage,
+            ));
+        }
+
+        // Строим «ударную» популяцию для следующего внешнего рестарта:
+        // используем силу мутации stage5 — максимальная из всего five_stage,
+        // чтобы гарантированно вырваться из текущего локального оптимума
+        current_population = Some(build_hybrid_outer_restart_population(
+            &final_population,
+            prices,
+            target_sum,
+            config.multistage_elite_count,
+            config.multistage_stage5_fraction,
+            rng,
+        ));
+    }
+
+    Err("hybrid_restart finished without a terminal stage".to_string())
 }
 
 fn solve_two_stage_restart(
@@ -1595,6 +1739,12 @@ fn solve_with_genetic_algorithm(request: SolveRequest) -> Result<GeneticAlgorith
             &mut rng,
         ),
         "five_stage_restart" => solve_five_stage_restart(
+            &request.prices,
+            request.target_sum,
+            &request.config,
+            &mut rng,
+        ),
+        "hybrid_restart" => solve_hybrid_restart(
             &request.prices,
             request.target_sum,
             &request.config,

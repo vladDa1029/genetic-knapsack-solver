@@ -39,6 +39,7 @@ BenchmarkMode = Literal[
     "restart_rescue",
     "two_stage_restart",
     "five_stage_restart",
+    "hybrid_restart",
 ]
 
 ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
@@ -49,6 +50,7 @@ ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
     "restart_rescue": "Restart rescue: полные рестарты и rescue-этап",
     "two_stage_restart": "Two-stage restart: перенос элиты и отдельный 2 этап",
     "five_stage_restart": "Five-stage restart: 5 этапов в Rust core",
+    "hybrid_restart": "Hybrid restart: five_stage с внешним two_stage рестартом",
 }
 
 STOP_REASON_LABELS = {
@@ -108,6 +110,7 @@ CSV_FIELD_LABELS = {
     "stage2_restart_fraction": "Сила restart-мутации 2 этапа",
     "multistage_stage4_fraction": "Доля мутации five-stage этап 4",
     "multistage_stage5_fraction": "Доля мутации five-stage этап 5",
+    "hybrid_max_outer_restarts": "Макс. внешних рестартов hybrid",
     "stage1_run_count": "Запусков 1 этапа",
     "stage2_run_count": "Запусков 2 этапа",
     "stage2_used": "2 этап использован",
@@ -164,6 +167,7 @@ class BenchmarkSettings:
     stage2_restart_fraction: float = 0.40
     multistage_stage4_fraction: float = 0.60
     multistage_stage5_fraction: float = 0.80
+    hybrid_max_outer_restarts: int = 2
     generation_mode: str = GENERATION_MODE_SUPERINCREASING_DISGUISED
     seed: int = 42
     output_root: Path = Path("benchmark_results")
@@ -205,6 +209,7 @@ class BenchmarkRecord:
     stage2_restart_fraction: float = 0.40
     multistage_stage4_fraction: float = 0.60
     multistage_stage5_fraction: float = 0.80
+    hybrid_max_outer_restarts: int = 2
     problem_seed: int = 0
     solver_seed: int = 0
     target_sum: int | None = None
@@ -457,6 +462,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Доля случайной мутации на 5 этапе five_stage_restart.",
     )
     parser.add_argument(
+        "--hybrid-max-outer-restarts",
+        type=int,
+        default=2,
+        help="Максимальное число внешних рестартов в hybrid_restart (default: 2).",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -677,6 +688,7 @@ def _records_payload(
                 "stage2_restart_fraction": settings.stage2_restart_fraction,
                 "multistage_stage4_fraction": settings.multistage_stage4_fraction,
                 "multistage_stage5_fraction": settings.multistage_stage5_fraction,
+                "hybrid_max_outer_restarts": settings.hybrid_max_outer_restarts,
                 "generation_mode": settings.generation_mode,
                 "seed": settings.seed,
                 "resume": settings.resume,
@@ -723,6 +735,7 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "stage2_restart_fraction",
         "multistage_stage4_fraction",
         "multistage_stage5_fraction",
+        "hybrid_max_outer_restarts",
         "target_sum",
         "hidden_vector",
         "best_vector",
@@ -868,6 +881,7 @@ def _write_summary(
         f"- Сила restart-мутации 2 этапа: `{settings.stage2_restart_fraction}`",
         f"- Доля мутации five-stage этап 4: `{settings.multistage_stage4_fraction}`",
         f"- Доля мутации five-stage этап 5: `{settings.multistage_stage5_fraction}`",
+        f"- Макс. внешних рестартов hybrid: `{settings.hybrid_max_outer_restarts}`",
         f"- Базовый seed: `{settings.seed}`",
         "",
         "## Сводные результаты",
@@ -997,9 +1011,10 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_restart_fraction=settings.stage2_restart_fraction,
                 multistage_stage4_fraction=settings.multistage_stage4_fraction,
                 multistage_stage5_fraction=settings.multistage_stage5_fraction,
+                hybrid_max_outer_restarts=settings.hybrid_max_outer_restarts,
             )
             task_started_at = perf_counter()
-            if config.solver_mode in ("five_stage_restart", "two_stage_restart"):
+            if config.solver_mode in ("five_stage_restart", "two_stage_restart", "hybrid_restart"):
                 result = solve_with_rust_core(
                     prices=problem.prices,
                     target_sum=problem.target_sum,
@@ -1047,6 +1062,7 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_restart_fraction=settings.stage2_restart_fraction,
                 multistage_stage4_fraction=settings.multistage_stage4_fraction,
                 multistage_stage5_fraction=settings.multistage_stage5_fraction,
+                hybrid_max_outer_restarts=settings.hybrid_max_outer_restarts,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 target_sum=problem.target_sum,
@@ -1108,6 +1124,7 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_restart_fraction=settings.stage2_restart_fraction,
                 multistage_stage4_fraction=settings.multistage_stage4_fraction,
                 multistage_stage5_fraction=settings.multistage_stage5_fraction,
+                hybrid_max_outer_restarts=settings.hybrid_max_outer_restarts,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 stop_reason="failed",
@@ -1157,6 +1174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         stage2_restart_fraction=args.stage2_restart_fraction,
         multistage_stage4_fraction=args.multistage_stage4_fraction,
         multistage_stage5_fraction=args.multistage_stage5_fraction,
+        hybrid_max_outer_restarts=args.hybrid_max_outer_restarts,
         generation_mode=args.generation_mode,
         seed=args.seed,
         output_root=args.output_root,
@@ -1187,6 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Сила restart-мутации 2 этапа: {settings.stage2_restart_fraction}")
     print(f"Доля мутации five-stage этап 4: {settings.multistage_stage4_fraction}")
     print(f"Доля мутации five-stage этап 5: {settings.multistage_stage5_fraction}")
+    print(f"Макс. внешних рестартов hybrid: {settings.hybrid_max_outer_restarts}")
     print(f"State-файл: {_state_path(output_dir)}")
     print(f"CSV-файл: {_csv_path(output_dir)}")
     print(f"Markdown-файл: {_summary_path(output_dir)}")
