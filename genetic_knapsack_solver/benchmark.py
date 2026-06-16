@@ -40,6 +40,11 @@ BenchmarkMode = Literal[
     "two_stage_restart",
     "five_stage_restart",
     "hybrid_restart",
+    "progressive_restart",
+    "hybrid_targeted_restart",
+    "hybrid_gene_fix",
+    "cascading_pipeline",
+    "chc",
 ]
 
 ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
@@ -51,6 +56,11 @@ ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
     "two_stage_restart": "Two-stage restart: перенос элиты и отдельный 2 этап",
     "five_stage_restart": "Five-stage restart: 5 этапов в Rust core",
     "hybrid_restart": "Hybrid restart: five_stage с внешним two_stage рестартом",
+    "progressive_restart": "Progressive restart: эскалация этапов 1→2→3→4→5 со свежей популяцией",
+    "hybrid_targeted_restart": "Hybrid targeted: рестарт в k-bit окрестности лучшей особи",
+    "hybrid_gene_fix": "Hybrid gene-fix: рестарт с инверсией замороженных битов",
+    "cascading_pipeline": "Cascading pipeline: волновой пайплайн с параллельными слоями",
+    "chc": "CHC: HUX-кроссовер с incest prevention и cataclysmic restart",
 }
 
 STOP_REASON_LABELS = {
@@ -110,7 +120,18 @@ CSV_FIELD_LABELS = {
     "stage2_restart_fraction": "Сила restart-мутации 2 этапа",
     "multistage_stage4_fraction": "Доля мутации five-stage этап 4",
     "multistage_stage5_fraction": "Доля мутации five-stage этап 5",
+    "multistage_fresh_fraction": "Доля свежих особей five-stage",
+    "multistage_double_mutation": "Двойная мутация five-stage",
+    "multistage_min_diversity": "Мин. разнообразие five-stage",
+    "multistage_late_tournament_size": "Размер турнира этапы 4-5",
     "hybrid_max_outer_restarts": "Макс. внешних рестартов hybrid",
+    "hybrid_targeted_k_min": "Targeted k_min",
+    "hybrid_targeted_k_max": "Targeted k_max",
+    "hybrid_gene_fix_threshold": "Gene-fix порог замороженности",
+    "hybrid_gene_fix_invert_count": "Gene-fix инверсий битов",
+    "chc_divergence_rate": "CHC divergence rate",
+    "chc_initial_threshold": "CHC initial threshold",
+    "chc_max_restarts": "CHC max restarts",
     "stage1_run_count": "Запусков 1 этапа",
     "stage2_run_count": "Запусков 2 этапа",
     "stage2_used": "2 этап использован",
@@ -167,7 +188,18 @@ class BenchmarkSettings:
     stage2_restart_fraction: float = 0.40
     multistage_stage4_fraction: float = 0.60
     multistage_stage5_fraction: float = 0.80
+    multistage_fresh_fraction: float = 0.0
+    multistage_double_mutation: bool = False
+    multistage_min_diversity: float = 0.0
+    multistage_late_tournament_size: int = 0
     hybrid_max_outer_restarts: int = 2
+    hybrid_targeted_k_min: int = 3
+    hybrid_targeted_k_max: int = 6
+    hybrid_gene_fix_threshold: float = 0.95
+    hybrid_gene_fix_invert_count: int = 3
+    chc_divergence_rate: float = 0.35
+    chc_initial_threshold: int = 0
+    chc_max_restarts: int = 5
     generation_mode: str = GENERATION_MODE_SUPERINCREASING_DISGUISED
     seed: int = 42
     output_root: Path = Path("benchmark_results")
@@ -209,7 +241,18 @@ class BenchmarkRecord:
     stage2_restart_fraction: float = 0.40
     multistage_stage4_fraction: float = 0.60
     multistage_stage5_fraction: float = 0.80
+    multistage_fresh_fraction: float = 0.0
+    multistage_double_mutation: bool = False
+    multistage_min_diversity: float = 0.0
+    multistage_late_tournament_size: int = 0
     hybrid_max_outer_restarts: int = 2
+    hybrid_targeted_k_min: int = 3
+    hybrid_targeted_k_max: int = 6
+    hybrid_gene_fix_threshold: float = 0.95
+    hybrid_gene_fix_invert_count: int = 3
+    chc_divergence_rate: float = 0.35
+    chc_initial_threshold: int = 0
+    chc_max_restarts: int = 5
     problem_seed: int = 0
     solver_seed: int = 0
     target_sum: int | None = None
@@ -397,7 +440,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stage2-offspring-mode",
-        choices=("two_children", "four_children_select_two"),
+        choices=("two_children", "four_children_select_two", "six_children_from_three_select_two"),
         default="two_children",
         help="РЎС…РµРјР° РїРѕСЃС‚СЂРѕРµРЅРёСЏ РїРѕС‚РѕРјРєРѕРІ РЅР° 2 СЌС‚Р°РїРµ two_stage_restart.",
     )
@@ -415,7 +458,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--multistage-offspring-mode",
-        choices=("two_children", "four_children_select_two"),
+        choices=("two_children", "four_children_select_two", "six_children_from_three_select_two"),
         default="two_children",
         help="Схема построения потомков для five_stage_restart.",
     )
@@ -439,7 +482,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stage1-offspring-mode",
-        choices=("two_children", "four_children_select_two"),
+        choices=("two_children", "four_children_select_two", "six_children_from_three_select_two"),
         default="two_children",
         help="Схема построения потомков на 1 этапе two_stage_restart.",
     )
@@ -462,10 +505,76 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Доля случайной мутации на 5 этапе five_stage_restart.",
     )
     parser.add_argument(
+        "--multistage-fresh-fraction",
+        type=float,
+        default=0.0,
+        help="Доля свежих случайных особей при переходе между этапами five_stage_restart (0.0 = выключено).",
+    )
+    parser.add_argument(
+        "--multistage-double-mutation",
+        action="store_true",
+        default=False,
+        help="Применять мутацию дважды к каждому потомку (увеличивает разнообразие популяции).",
+    )
+    parser.add_argument(
+        "--multistage-min-diversity",
+        type=float,
+        default=0.0,
+        help="Минимальная доля бит, отличающихся от лучшей особи. Если потомок ближе — принудительная мутация (0.0 = выключено).",
+    )
+    parser.add_argument(
+        "--multistage-late-tournament-size",
+        type=int,
+        default=0,
+        help="Размер турнира для этапов 4 и 5 five_stage_restart (0 = использовать --tournament-size).",
+    )
+    parser.add_argument(
         "--hybrid-max-outer-restarts",
         type=int,
         default=2,
         help="Максимальное число внешних рестартов в hybrid_restart (default: 2).",
+    )
+    parser.add_argument(
+        "--hybrid-targeted-k-min",
+        type=int,
+        default=3,
+        help="Минимальное k для k-bit окрестности в hybrid_targeted_restart (default: 3).",
+    )
+    parser.add_argument(
+        "--hybrid-targeted-k-max",
+        type=int,
+        default=6,
+        help="Максимальное k для k-bit окрестности в hybrid_targeted_restart (default: 6).",
+    )
+    parser.add_argument(
+        "--hybrid-gene-fix-threshold",
+        type=float,
+        default=0.95,
+        help="Доля популяции для детекции замороженного бита в hybrid_gene_fix (default: 0.95).",
+    )
+    parser.add_argument(
+        "--hybrid-gene-fix-invert-count",
+        type=int,
+        default=3,
+        help="Число замороженных битов, инвертируемых в каждой особи новой популяции hybrid_gene_fix (default: 3).",
+    )
+    parser.add_argument(
+        "--chc-divergence-rate",
+        type=float,
+        default=0.35,
+        help="Доля битов для cataclysmic restart мутации в CHC (default: 0.35).",
+    )
+    parser.add_argument(
+        "--chc-initial-threshold",
+        type=int,
+        default=0,
+        help="Начальный Hamming threshold для incest prevention в CHC (0 = auto = n_genes/4).",
+    )
+    parser.add_argument(
+        "--chc-max-restarts",
+        type=int,
+        default=5,
+        help="Максимальное число cataclysmic restarts в CHC (default: 5).",
     )
     parser.add_argument(
         "--seed",
@@ -688,7 +797,18 @@ def _records_payload(
                 "stage2_restart_fraction": settings.stage2_restart_fraction,
                 "multistage_stage4_fraction": settings.multistage_stage4_fraction,
                 "multistage_stage5_fraction": settings.multistage_stage5_fraction,
+                "multistage_fresh_fraction": settings.multistage_fresh_fraction,
+                "multistage_double_mutation": settings.multistage_double_mutation,
+                "multistage_min_diversity": settings.multistage_min_diversity,
+                "multistage_late_tournament_size": settings.multistage_late_tournament_size,
                 "hybrid_max_outer_restarts": settings.hybrid_max_outer_restarts,
+                "hybrid_targeted_k_min": settings.hybrid_targeted_k_min,
+                "hybrid_targeted_k_max": settings.hybrid_targeted_k_max,
+                "hybrid_gene_fix_threshold": settings.hybrid_gene_fix_threshold,
+                "hybrid_gene_fix_invert_count": settings.hybrid_gene_fix_invert_count,
+                "chc_divergence_rate": settings.chc_divergence_rate,
+                "chc_initial_threshold": settings.chc_initial_threshold,
+                "chc_max_restarts": settings.chc_max_restarts,
                 "generation_mode": settings.generation_mode,
                 "seed": settings.seed,
                 "resume": settings.resume,
@@ -735,7 +855,18 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "stage2_restart_fraction",
         "multistage_stage4_fraction",
         "multistage_stage5_fraction",
+        "multistage_fresh_fraction",
+        "multistage_double_mutation",
+        "multistage_min_diversity",
+        "multistage_late_tournament_size",
         "hybrid_max_outer_restarts",
+        "hybrid_targeted_k_min",
+        "hybrid_targeted_k_max",
+        "hybrid_gene_fix_threshold",
+        "hybrid_gene_fix_invert_count",
+        "chc_divergence_rate",
+        "chc_initial_threshold",
+        "chc_max_restarts",
         "target_sum",
         "hidden_vector",
         "best_vector",
@@ -881,6 +1012,10 @@ def _write_summary(
         f"- Сила restart-мутации 2 этапа: `{settings.stage2_restart_fraction}`",
         f"- Доля мутации five-stage этап 4: `{settings.multistage_stage4_fraction}`",
         f"- Доля мутации five-stage этап 5: `{settings.multistage_stage5_fraction}`",
+        f"- Доля свежих особей five-stage: `{settings.multistage_fresh_fraction}`",
+        f"- Двойная мутация five-stage: `{settings.multistage_double_mutation}`",
+        f"- Мин. разнообразие five-stage: `{settings.multistage_min_diversity}`",
+        f"- Размер турнира этапы 4-5: `{settings.multistage_late_tournament_size}`",
         f"- Макс. внешних рестартов hybrid: `{settings.hybrid_max_outer_restarts}`",
         f"- Базовый seed: `{settings.seed}`",
         "",
@@ -952,12 +1087,13 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
         if record_key in records_by_key and records_by_key[record_key].status == "completed":
             continue
 
-        if algorithm_mode == "restart_rescue":
-            solver_mode = "restart_rescue"
-        elif algorithm_mode == "two_stage_restart":
-            solver_mode = "two_stage_restart"
-        elif algorithm_mode == "five_stage_restart":
-            solver_mode = "five_stage_restart"
+        if algorithm_mode in (
+            "restart_rescue", "two_stage_restart", "five_stage_restart",
+            "hybrid_restart", "progressive_restart",
+            "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
+            "chc",
+        ):
+            solver_mode = algorithm_mode
         else:
             solver_mode = "classic"
         nga_mode: NgaMode = algorithm_mode if algorithm_mode in {
@@ -1011,10 +1147,25 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_restart_fraction=settings.stage2_restart_fraction,
                 multistage_stage4_fraction=settings.multistage_stage4_fraction,
                 multistage_stage5_fraction=settings.multistage_stage5_fraction,
+                multistage_fresh_fraction=settings.multistage_fresh_fraction,
+                multistage_double_mutation=settings.multistage_double_mutation,
+                multistage_min_diversity=settings.multistage_min_diversity,
+                multistage_late_tournament_size=settings.multistage_late_tournament_size,
                 hybrid_max_outer_restarts=settings.hybrid_max_outer_restarts,
+                hybrid_targeted_k_min=settings.hybrid_targeted_k_min,
+                hybrid_targeted_k_max=settings.hybrid_targeted_k_max,
+                hybrid_gene_fix_threshold=settings.hybrid_gene_fix_threshold,
+                hybrid_gene_fix_invert_count=settings.hybrid_gene_fix_invert_count,
+                chc_divergence_rate=settings.chc_divergence_rate,
+                chc_initial_threshold=settings.chc_initial_threshold,
+                chc_max_restarts=settings.chc_max_restarts,
             )
             task_started_at = perf_counter()
-            if config.solver_mode in ("five_stage_restart", "two_stage_restart", "hybrid_restart"):
+            if config.solver_mode in (
+                "five_stage_restart", "two_stage_restart", "hybrid_restart",
+                "progressive_restart", "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
+                "chc",
+            ):
                 result = solve_with_rust_core(
                     prices=problem.prices,
                     target_sum=problem.target_sum,
@@ -1062,7 +1213,18 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_restart_fraction=settings.stage2_restart_fraction,
                 multistage_stage4_fraction=settings.multistage_stage4_fraction,
                 multistage_stage5_fraction=settings.multistage_stage5_fraction,
+                multistage_fresh_fraction=settings.multistage_fresh_fraction,
+                multistage_double_mutation=settings.multistage_double_mutation,
+                multistage_min_diversity=settings.multistage_min_diversity,
+                multistage_late_tournament_size=settings.multistage_late_tournament_size,
                 hybrid_max_outer_restarts=settings.hybrid_max_outer_restarts,
+                hybrid_targeted_k_min=settings.hybrid_targeted_k_min,
+                hybrid_targeted_k_max=settings.hybrid_targeted_k_max,
+                hybrid_gene_fix_threshold=settings.hybrid_gene_fix_threshold,
+                hybrid_gene_fix_invert_count=settings.hybrid_gene_fix_invert_count,
+                chc_divergence_rate=settings.chc_divergence_rate,
+                chc_initial_threshold=settings.chc_initial_threshold,
+                chc_max_restarts=settings.chc_max_restarts,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 target_sum=problem.target_sum,
@@ -1124,7 +1286,18 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 stage2_restart_fraction=settings.stage2_restart_fraction,
                 multistage_stage4_fraction=settings.multistage_stage4_fraction,
                 multistage_stage5_fraction=settings.multistage_stage5_fraction,
+                multistage_fresh_fraction=settings.multistage_fresh_fraction,
+                multistage_double_mutation=settings.multistage_double_mutation,
+                multistage_min_diversity=settings.multistage_min_diversity,
+                multistage_late_tournament_size=settings.multistage_late_tournament_size,
                 hybrid_max_outer_restarts=settings.hybrid_max_outer_restarts,
+                hybrid_targeted_k_min=settings.hybrid_targeted_k_min,
+                hybrid_targeted_k_max=settings.hybrid_targeted_k_max,
+                hybrid_gene_fix_threshold=settings.hybrid_gene_fix_threshold,
+                hybrid_gene_fix_invert_count=settings.hybrid_gene_fix_invert_count,
+                chc_divergence_rate=settings.chc_divergence_rate,
+                chc_initial_threshold=settings.chc_initial_threshold,
+                chc_max_restarts=settings.chc_max_restarts,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 stop_reason="failed",
@@ -1174,7 +1347,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         stage2_restart_fraction=args.stage2_restart_fraction,
         multistage_stage4_fraction=args.multistage_stage4_fraction,
         multistage_stage5_fraction=args.multistage_stage5_fraction,
+        multistage_fresh_fraction=args.multistage_fresh_fraction,
+        multistage_double_mutation=args.multistage_double_mutation,
+        multistage_min_diversity=args.multistage_min_diversity,
+        multistage_late_tournament_size=args.multistage_late_tournament_size,
         hybrid_max_outer_restarts=args.hybrid_max_outer_restarts,
+        chc_divergence_rate=args.chc_divergence_rate,
+        chc_initial_threshold=args.chc_initial_threshold,
+        chc_max_restarts=args.chc_max_restarts,
+        hybrid_targeted_k_min=args.hybrid_targeted_k_min,
+        hybrid_targeted_k_max=args.hybrid_targeted_k_max,
+        hybrid_gene_fix_threshold=args.hybrid_gene_fix_threshold,
+        hybrid_gene_fix_invert_count=args.hybrid_gene_fix_invert_count,
         generation_mode=args.generation_mode,
         seed=args.seed,
         output_root=args.output_root,
@@ -1205,6 +1389,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Сила restart-мутации 2 этапа: {settings.stage2_restart_fraction}")
     print(f"Доля мутации five-stage этап 4: {settings.multistage_stage4_fraction}")
     print(f"Доля мутации five-stage этап 5: {settings.multistage_stage5_fraction}")
+    print(f"Доля свежих особей five-stage: {settings.multistage_fresh_fraction}")
+    print(f"Двойная мутация five-stage: {settings.multistage_double_mutation}")
+    print(f"Мин. разнообразие five-stage: {settings.multistage_min_diversity}")
+    print(f"Размер турнира этапы 4-5: {settings.multistage_late_tournament_size}")
     print(f"Макс. внешних рестартов hybrid: {settings.hybrid_max_outer_restarts}")
     print(f"State-файл: {_state_path(output_dir)}")
     print(f"CSV-файл: {_csv_path(output_dir)}")

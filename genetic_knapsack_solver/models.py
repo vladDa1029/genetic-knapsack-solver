@@ -5,14 +5,19 @@ from typing import Literal
 
 
 NgaMode = Literal["none", "two_point", "elite_heavy_mutation", "staged_hypermutation"]
-SolverMode = Literal["classic", "restart_rescue", "two_stage_restart", "five_stage_restart"]
+SolverMode = Literal[
+    "classic", "restart_rescue", "two_stage_restart", "five_stage_restart",
+    "hybrid_restart", "progressive_restart",
+    "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
+    "chc",
+]
 RestartPopulationMode = Literal["elite_from_last_population"]
 RestartMutationType = Literal["many_bits", "reverse"]
 CrossoverType = Literal["one_point", "two_point"]
 MutationType = Literal["one_point", "two_point", "reverse"]
 MultistageMutationType = Literal["one_point", "two_point"]
-MultistageOffspringMode = Literal["two_children", "four_children_select_two"]
-Stage2OffspringMode = Literal["two_children", "four_children_select_two"]
+MultistageOffspringMode = Literal["two_children", "four_children_select_two", "six_children_from_three_select_two"]
+Stage2OffspringMode = Literal["two_children", "four_children_select_two", "six_children_from_three_select_two"]
 OperatorType = Literal["one_point", "two_point", "reverse"]
 
 
@@ -57,15 +62,30 @@ class GeneticAlgorithmConfig:
     stage2_restart_fraction: float = 0.40
     multistage_stage4_fraction: float = 0.60
     multistage_stage5_fraction: float = 0.80
+    multistage_fresh_fraction: float = 0.0
+    multistage_double_mutation: bool = False
+    multistage_min_diversity: float = 0.0
+    multistage_late_tournament_size: int = 0
     hybrid_max_outer_restarts: int = 2
+    hybrid_targeted_k_min: int = 3
+    hybrid_targeted_k_max: int = 6
+    hybrid_gene_fix_threshold: float = 0.95
+    hybrid_gene_fix_invert_count: int = 3
+    chc_divergence_rate: float = 0.35
+    chc_initial_threshold: int = 0
+    chc_max_restarts: int = 5
 
     def __post_init__(self) -> None:
         if self.solver_mode not in (
-            "classic", "restart_rescue", "two_stage_restart", "five_stage_restart", "hybrid_restart"
+            "classic", "restart_rescue", "two_stage_restart", "five_stage_restart",
+            "hybrid_restart", "progressive_restart",
+            "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
+            "chc",
         ):
             raise ValueError(
                 "solver_mode must be one of: classic, restart_rescue, two_stage_restart, "
-                "five_stage_restart, hybrid_restart"
+                "five_stage_restart, hybrid_restart, progressive_restart, "
+                "hybrid_targeted_restart, hybrid_gene_fix, cascading_pipeline, chc"
             )
         if self.population_size < 2:
             raise ValueError("population_size must be at least 2")
@@ -95,25 +115,25 @@ class GeneticAlgorithmConfig:
             raise ValueError("stage2_crossover_type must be one of: one_point, two_point")
         if self.stage2_mutation_type not in ("one_point", "two_point", "reverse"):
             raise ValueError("stage2_mutation_type must be one of: one_point, two_point, reverse")
-        if self.stage2_offspring_mode not in ("two_children", "four_children_select_two"):
+        if self.stage2_offspring_mode not in ("two_children", "four_children_select_two", "six_children_from_three_select_two"):
             raise ValueError(
-                "stage2_offspring_mode must be one of: two_children, four_children_select_two"
+                "stage2_offspring_mode must be one of: two_children, four_children_select_two, six_children_from_three_select_two"
             )
         if self.multistage_crossover_type not in ("one_point", "two_point"):
             raise ValueError("multistage_crossover_type must be one of: one_point, two_point")
         if self.multistage_mutation_type not in ("one_point", "two_point"):
             raise ValueError("multistage_mutation_type must be one of: one_point, two_point")
-        if self.multistage_offspring_mode not in ("two_children", "four_children_select_two"):
+        if self.multistage_offspring_mode not in ("two_children", "four_children_select_two", "six_children_from_three_select_two"):
             raise ValueError(
-                "multistage_offspring_mode must be one of: two_children, four_children_select_two"
+                "multistage_offspring_mode must be one of: two_children, four_children_select_two, six_children_from_three_select_two"
             )
         if self.stage1_crossover_type not in ("one_point", "two_point"):
             raise ValueError("stage1_crossover_type must be one of: one_point, two_point")
         if self.stage1_mutation_type not in ("one_point", "two_point", "reverse"):
             raise ValueError("stage1_mutation_type must be one of: one_point, two_point, reverse")
-        if self.stage1_offspring_mode not in ("two_children", "four_children_select_two"):
+        if self.stage1_offspring_mode not in ("two_children", "four_children_select_two", "six_children_from_three_select_two"):
             raise ValueError(
-                "stage1_offspring_mode must be one of: two_children, four_children_select_two"
+                "stage1_offspring_mode must be one of: two_children, four_children_select_two, six_children_from_three_select_two"
             )
         for name, value in (
             ("crossover_rate", self.crossover_rate),
@@ -124,6 +144,7 @@ class GeneticAlgorithmConfig:
             ("stage2_restart_fraction", self.stage2_restart_fraction),
             ("multistage_stage4_fraction", self.multistage_stage4_fraction),
             ("multistage_stage5_fraction", self.multistage_stage5_fraction),
+            ("multistage_fresh_fraction", self.multistage_fresh_fraction),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be between 0.0 and 1.0")
@@ -172,15 +193,34 @@ class GeneticAlgorithmConfig:
                 raise ValueError("repeat_limit is not used in five_stage_restart solver_mode")
             if self.generations < self.stagnation:
                 raise ValueError("generations must be at least stagnation in five_stage_restart solver_mode")
-        else:  # hybrid_restart
+        elif self.solver_mode == "chc":
             if self.nga_mode != "none":
-                raise ValueError("nga_mode is not used in hybrid_restart solver_mode")
+                raise ValueError("nga_mode is not used in chc solver_mode")
             if self.repeat_limit is not None:
-                raise ValueError("repeat_limit is not used in hybrid_restart solver_mode")
+                raise ValueError("repeat_limit is not used in chc solver_mode")
+            if not 0.05 <= self.chc_divergence_rate <= 0.95:
+                raise ValueError("chc_divergence_rate must be in [0.05, 0.95]")
+            if self.chc_initial_threshold < 0:
+                raise ValueError("chc_initial_threshold must be >= 0")
+            if self.chc_max_restarts < 0:
+                raise ValueError("chc_max_restarts must be >= 0")
+        elif self.solver_mode in ("hybrid_restart", "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline"):
+            if self.nga_mode != "none":
+                raise ValueError(f"nga_mode is not used in {self.solver_mode} solver_mode")
+            if self.repeat_limit is not None:
+                raise ValueError(f"repeat_limit is not used in {self.solver_mode} solver_mode")
             if self.generations < self.stagnation:
-                raise ValueError("generations must be at least stagnation in hybrid_restart solver_mode")
+                raise ValueError(f"generations must be at least stagnation in {self.solver_mode} solver_mode")
             if self.hybrid_max_outer_restarts < 1:
                 raise ValueError("hybrid_max_outer_restarts must be at least 1")
+            if self.solver_mode == "hybrid_targeted_restart":
+                if self.hybrid_targeted_k_min < 1 or self.hybrid_targeted_k_max < self.hybrid_targeted_k_min:
+                    raise ValueError("hybrid_targeted_k_min must be >= 1 and k_max >= k_min")
+            if self.solver_mode == "hybrid_gene_fix":
+                if not 0.5 <= self.hybrid_gene_fix_threshold <= 1.0:
+                    raise ValueError("hybrid_gene_fix_threshold must be in [0.5, 1.0]")
+                if self.hybrid_gene_fix_invert_count < 1:
+                    raise ValueError("hybrid_gene_fix_invert_count must be >= 1")
 
 
 @dataclass(slots=True)
