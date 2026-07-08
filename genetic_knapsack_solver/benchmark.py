@@ -45,6 +45,8 @@ BenchmarkMode = Literal[
     "hybrid_gene_fix",
     "cascading_pipeline",
     "chc",
+    "deterministic_crowding",
+    "hybrid_portfolio",
 ]
 
 ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
@@ -61,6 +63,8 @@ ALGORITHM_MODE_LABELS: dict[BenchmarkMode, str] = {
     "hybrid_gene_fix": "Hybrid gene-fix: рестарт с инверсией замороженных битов",
     "cascading_pipeline": "Cascading pipeline: волновой пайплайн с параллельными слоями",
     "chc": "CHC: HUX-кроссовер с incest prevention и cataclysmic restart",
+    "deterministic_crowding": "Deterministic Crowding: нишинг через локальную конкуренцию с похожим родителем",
+    "hybrid_portfolio": "Hybrid portfolio: hybrid_restart с разными операторами в каждом цикле",
 }
 
 STOP_REASON_LABELS = {
@@ -132,6 +136,7 @@ CSV_FIELD_LABELS = {
     "chc_divergence_rate": "CHC divergence rate",
     "chc_initial_threshold": "CHC initial threshold",
     "chc_max_restarts": "CHC max restarts",
+    "dc_mutation_fraction": "DC mutation fraction",
     "stage1_run_count": "Запусков 1 этапа",
     "stage2_run_count": "Запусков 2 этапа",
     "stage2_used": "2 этап использован",
@@ -200,6 +205,7 @@ class BenchmarkSettings:
     chc_divergence_rate: float = 0.35
     chc_initial_threshold: int = 0
     chc_max_restarts: int = 5
+    dc_mutation_fraction: float = 0.03
     generation_mode: str = GENERATION_MODE_SUPERINCREASING_DISGUISED
     seed: int = 42
     output_root: Path = Path("benchmark_results")
@@ -253,6 +259,7 @@ class BenchmarkRecord:
     chc_divergence_rate: float = 0.35
     chc_initial_threshold: int = 0
     chc_max_restarts: int = 5
+    dc_mutation_fraction: float = 0.03
     problem_seed: int = 0
     solver_seed: int = 0
     target_sum: int | None = None
@@ -577,6 +584,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Максимальное число cataclysmic restarts в CHC (default: 5).",
     )
     parser.add_argument(
+        "--dc-mutation-fraction",
+        type=float,
+        default=0.03,
+        help="Доля бит для лёгкой мутации потомков в deterministic_crowding (default: 0.03 ≈ 1 бит при n=29).",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -809,6 +822,7 @@ def _records_payload(
                 "chc_divergence_rate": settings.chc_divergence_rate,
                 "chc_initial_threshold": settings.chc_initial_threshold,
                 "chc_max_restarts": settings.chc_max_restarts,
+                "dc_mutation_fraction": settings.dc_mutation_fraction,
                 "generation_mode": settings.generation_mode,
                 "seed": settings.seed,
                 "resume": settings.resume,
@@ -867,6 +881,7 @@ def _write_csv(output_dir: Path, records: list[BenchmarkRecord]) -> None:
         "chc_divergence_rate",
         "chc_initial_threshold",
         "chc_max_restarts",
+        "dc_mutation_fraction",
         "target_sum",
         "hidden_vector",
         "best_vector",
@@ -1091,7 +1106,7 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
             "restart_rescue", "two_stage_restart", "five_stage_restart",
             "hybrid_restart", "progressive_restart",
             "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
-            "chc",
+            "chc", "deterministic_crowding", "hybrid_portfolio",
         ):
             solver_mode = algorithm_mode
         else:
@@ -1159,12 +1174,13 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 chc_divergence_rate=settings.chc_divergence_rate,
                 chc_initial_threshold=settings.chc_initial_threshold,
                 chc_max_restarts=settings.chc_max_restarts,
+                dc_mutation_fraction=settings.dc_mutation_fraction,
             )
             task_started_at = perf_counter()
             if config.solver_mode in (
                 "five_stage_restart", "two_stage_restart", "hybrid_restart",
                 "progressive_restart", "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
-                "chc",
+                "chc", "deterministic_crowding", "hybrid_portfolio",
             ):
                 result = solve_with_rust_core(
                     prices=problem.prices,
@@ -1225,6 +1241,7 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 chc_divergence_rate=settings.chc_divergence_rate,
                 chc_initial_threshold=settings.chc_initial_threshold,
                 chc_max_restarts=settings.chc_max_restarts,
+                dc_mutation_fraction=settings.dc_mutation_fraction,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 target_sum=problem.target_sum,
@@ -1298,6 +1315,7 @@ def run_benchmark(settings: BenchmarkSettings) -> Path:
                 chc_divergence_rate=settings.chc_divergence_rate,
                 chc_initial_threshold=settings.chc_initial_threshold,
                 chc_max_restarts=settings.chc_max_restarts,
+                dc_mutation_fraction=settings.dc_mutation_fraction,
                 problem_seed=problem_seed,
                 solver_seed=solver_seed,
                 stop_reason="failed",
@@ -1355,6 +1373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         chc_divergence_rate=args.chc_divergence_rate,
         chc_initial_threshold=args.chc_initial_threshold,
         chc_max_restarts=args.chc_max_restarts,
+        dc_mutation_fraction=args.dc_mutation_fraction,
         hybrid_targeted_k_min=args.hybrid_targeted_k_min,
         hybrid_targeted_k_max=args.hybrid_targeted_k_max,
         hybrid_gene_fix_threshold=args.hybrid_gene_fix_threshold,

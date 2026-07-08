@@ -9,7 +9,7 @@ SolverMode = Literal[
     "classic", "restart_rescue", "two_stage_restart", "five_stage_restart",
     "hybrid_restart", "progressive_restart",
     "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
-    "chc",
+    "chc", "deterministic_crowding", "hybrid_portfolio",
 ]
 RestartPopulationMode = Literal["elite_from_last_population"]
 RestartMutationType = Literal["many_bits", "reverse"]
@@ -74,18 +74,20 @@ class GeneticAlgorithmConfig:
     chc_divergence_rate: float = 0.35
     chc_initial_threshold: int = 0
     chc_max_restarts: int = 5
+    dc_mutation_fraction: float = 0.03
 
     def __post_init__(self) -> None:
         if self.solver_mode not in (
             "classic", "restart_rescue", "two_stage_restart", "five_stage_restart",
             "hybrid_restart", "progressive_restart",
             "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline",
-            "chc",
+            "chc", "deterministic_crowding", "hybrid_portfolio",
         ):
             raise ValueError(
                 "solver_mode must be one of: classic, restart_rescue, two_stage_restart, "
                 "five_stage_restart, hybrid_restart, progressive_restart, "
-                "hybrid_targeted_restart, hybrid_gene_fix, cascading_pipeline, chc"
+                "hybrid_targeted_restart, hybrid_gene_fix, cascading_pipeline, chc, "
+                "deterministic_crowding, hybrid_portfolio"
             )
         if self.population_size < 2:
             raise ValueError("population_size must be at least 2")
@@ -204,7 +206,16 @@ class GeneticAlgorithmConfig:
                 raise ValueError("chc_initial_threshold must be >= 0")
             if self.chc_max_restarts < 0:
                 raise ValueError("chc_max_restarts must be >= 0")
-        elif self.solver_mode in ("hybrid_restart", "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline"):
+        elif self.solver_mode == "deterministic_crowding":
+            if self.nga_mode != "none":
+                raise ValueError("nga_mode is not used in deterministic_crowding solver_mode")
+            if self.repeat_limit is not None:
+                raise ValueError("repeat_limit is not used in deterministic_crowding solver_mode")
+            if not 0.0 <= self.dc_mutation_fraction <= 1.0:
+                raise ValueError("dc_mutation_fraction must be in [0.0, 1.0]")
+            if self.hybrid_max_outer_restarts < 1:
+                raise ValueError("hybrid_max_outer_restarts must be at least 1")
+        elif self.solver_mode in ("hybrid_restart", "hybrid_targeted_restart", "hybrid_gene_fix", "cascading_pipeline", "hybrid_portfolio"):
             if self.nga_mode != "none":
                 raise ValueError(f"nga_mode is not used in {self.solver_mode} solver_mode")
             if self.repeat_limit is not None:

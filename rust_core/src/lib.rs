@@ -72,6 +72,10 @@ struct GeneticAlgorithmConfig {
     chc_divergence_rate: f64,
     chc_initial_threshold: usize,
     chc_max_restarts: usize,
+    // Deterministic Crowding (Mahfoud 1992): нишинг через локальную конкуренцию
+    // ребёнка с похожим родителем. dc_mutation_fraction — доля бит для лёгкой
+    // мутации потомков (типично ~1/n, чтобы DC опирался на crossover + replacement).
+    dc_mutation_fraction: f64,
 }
 
 impl Default for GeneticAlgorithmConfig {
@@ -119,6 +123,7 @@ impl Default for GeneticAlgorithmConfig {
             chc_divergence_rate: 0.35,
             chc_initial_threshold: 0,
             chc_max_restarts: 5,
+            dc_mutation_fraction: 0.03,
         }
     }
 }
@@ -127,10 +132,10 @@ impl GeneticAlgorithmConfig {
     fn validate(&self) -> Result<(), String> {
         if !matches!(
             self.solver_mode.as_str(),
-            "classic" | "restart_rescue" | "two_stage_restart" | "five_stage_restart" | "hybrid_restart" | "progressive_restart" | "hybrid_targeted_restart" | "hybrid_gene_fix" | "cascading_pipeline" | "chc"
+            "classic" | "restart_rescue" | "two_stage_restart" | "five_stage_restart" | "hybrid_restart" | "progressive_restart" | "hybrid_targeted_restart" | "hybrid_gene_fix" | "cascading_pipeline" | "chc" | "deterministic_crowding" | "hybrid_portfolio"
         ) {
             return Err(
-                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, five_stage_restart, hybrid_restart, progressive_restart, hybrid_targeted_restart, hybrid_gene_fix, cascading_pipeline, chc"
+                "solver_mode must be one of: classic, restart_rescue, two_stage_restart, five_stage_restart, hybrid_restart, progressive_restart, hybrid_targeted_restart, hybrid_gene_fix, cascading_pipeline, chc, deterministic_crowding, hybrid_portfolio"
                     .to_string(),
             );
         }
@@ -328,15 +333,15 @@ impl GeneticAlgorithmConfig {
                     return Err("generations must be at least stagnation in five_stage_restart solver_mode".to_string());
                 }
             }
-            "hybrid_restart" => {
+            "hybrid_restart" | "hybrid_portfolio" => {
                 if self.nga_mode != "none" {
-                    return Err("nga_mode is not used in hybrid_restart solver_mode".to_string());
+                    return Err("nga_mode is not used in this solver_mode".to_string());
                 }
                 if self.repeat_limit.is_some() {
-                    return Err("repeat_limit is not used in hybrid_restart solver_mode".to_string());
+                    return Err("repeat_limit is not used in this solver_mode".to_string());
                 }
                 if self.generations < self.stagnation {
-                    return Err("generations must be at least stagnation in hybrid_restart solver_mode".to_string());
+                    return Err("generations must be at least stagnation in this solver_mode".to_string());
                 }
                 if self.hybrid_max_outer_restarts == 0 {
                     return Err("hybrid_max_outer_restarts must be at least 1".to_string());
@@ -378,6 +383,11 @@ impl GeneticAlgorithmConfig {
             "chc" => {
                 if !(0.05..=0.95).contains(&self.chc_divergence_rate) {
                     return Err("chc_divergence_rate must be in [0.05, 0.95]".to_string());
+                }
+            }
+            "deterministic_crowding" => {
+                if !(0.0..=1.0).contains(&self.dc_mutation_fraction) {
+                    return Err("dc_mutation_fraction must be in [0.0, 1.0]".to_string());
                 }
             }
             _ => {}
@@ -1880,6 +1890,108 @@ fn solve_hybrid_restart(
     Err("hybrid_restart finished without a terminal stage".to_string())
 }
 
+// ============================================================================
+// hybrid_portfolio: гетерогенный портфель рестартов.
+//
+// Как baseline hybrid_restart (N независимых five_stage прогонов со СВЕЖЕЙ
+// случайной популяцией), но каждый цикл использует РАЗНУЮ конфигурацию операторов.
+//
+// Зачем: трудные инстансы имеют p_single≈0 для ОДНОГО набора операторов. Для
+// другого набора p_single может быть >0. Портфель разных операторов даёт каждому
+// инстансу несколько "разных шансов", сохраняя при этом независимость попыток —
+// единственный принцип, который держал baseline на 96%.
+//
+// Сохраняется всё, что делает baseline сильным:
+//   - свежая случайная популяция в каждом цикле (нет переноса знания);
+//   - глобально лучший результат через все циклы;
+//   - ранний выход при exact_match.
+// Меняется только НАБОР ОПЕРАТОРОВ от цикла к циклу.
+// ============================================================================
+
+// Строит портфель конфигураций: цикл i получает portfolio[i % len].
+// Каждая запись — клон базового config с переопределением конкретных операторов.
+//
+// Порядок важен: СНАЧАЛА несколько базовых циклов (повторяют покрытие baseline и
+// держат "лёгкие" инстансы, которые решаются повторным базовым прогоном), ПОТОМ
+// циклы-варианты (дают разнообразие операторов для трудных инстансов).
+// Это устраняет регресс, при котором ранний переход на варианты терял лёгкие.
+fn build_operator_portfolio(base: &GeneticAlgorithmConfig) -> Vec<GeneticAlgorithmConfig> {
+    vec![
+        // 0,1,2: базовая конфигурация (как baseline) — three независимых прогона
+        //        с two_point/two_point/4-children, tour=3. Держат лёгкие инстансы.
+        base.clone(),
+        base.clone(),
+        base.clone(),
+        // 3: "классические" операторы — one_point/one_point/two_children.
+        //    Принципиально иная структура рекомбинации.
+        GeneticAlgorithmConfig {
+            multistage_crossover_type: "one_point".to_string(),
+            multistage_mutation_type: "one_point".to_string(),
+            multistage_offspring_mode: "two_children".to_string(),
+            ..base.clone()
+        },
+        // 4: трёхродительская рекомбинация (6 детей из 3 родителей, отобрать 2).
+        //    Другое смешивание генетического материала.
+        GeneticAlgorithmConfig {
+            multistage_offspring_mode: "six_children_from_three_select_two".to_string(),
+            ..base.clone()
+        },
+        // 5: пониженное давление отбора (tournament=2) — больше exploration.
+        GeneticAlgorithmConfig {
+            tournament_size: 2,
+            ..base.clone()
+        },
+        // 6: повышенное давление (tournament=4) + другая интенсивность "встряски".
+        GeneticAlgorithmConfig {
+            tournament_size: 4,
+            multistage_stage4_fraction: 0.40,
+            multistage_stage5_fraction: 0.60,
+            ..base.clone()
+        },
+    ]
+}
+
+fn solve_hybrid_portfolio(
+    prices: &[i64],
+    target_sum: i64,
+    config: &GeneticAlgorithmConfig,
+    rng: &mut Rng64,
+) -> Result<GeneticAlgorithmResult, String> {
+    let max_outer_restarts = config.hybrid_max_outer_restarts;
+    let portfolio = build_operator_portfolio(config);
+    let mut total_generations = 0usize;
+    let mut best_run: Option<SingleRunResult> = None;
+    let mut all_stage_run_counts: Vec<usize> = Vec::new();
+    let mut all_stage_best_differences: Vec<i64> = Vec::new();
+
+    for outer_restart in 0..=max_outer_restarts {
+        // Каждый цикл — свой набор операторов из портфеля (с циклическим повтором).
+        let cycle_config = &portfolio[outer_restart % portfolio.len()];
+        let (run, stage_run_counts, stage_best_diffs, gens) =
+            run_five_stage_cycle(prices, target_sum, cycle_config, rng, None, 5);
+        total_generations += gens;
+        all_stage_run_counts.extend_from_slice(&stage_run_counts);
+        all_stage_best_differences.extend_from_slice(&stage_best_diffs);
+
+        let exact = run.stop_reason == "exact_match";
+        let is_better = best_run.as_ref().map_or(true, |b: &SingleRunResult| run.difference < b.difference);
+        if is_better {
+            best_run = Some(run);
+        }
+
+        if exact || outer_restart == max_outer_restarts {
+            let final_run = best_run.expect("best_run is always set after first cycle");
+            let stop = if exact { "exact_match" } else { "stagnation" };
+            let final_stage = all_stage_run_counts.len();
+            return Ok(build_result_with_stage_metadata(
+                final_run, total_generations, stop,
+                all_stage_run_counts, all_stage_best_differences, final_stage,
+            ));
+        }
+    }
+    Err("hybrid_portfolio finished without a terminal stage".to_string())
+}
+
 // Строит "целевую" начальную популяцию: каждая особь — результат инверсии k случайных
 // битов лучшей особи, где k выбирается uniform из [k_min, k_max] для каждой особи.
 // Сама лучшая особь не включается (только её соседи), это обеспечивает diversity при
@@ -2456,6 +2568,186 @@ fn solve_chc(
     ))
 }
 
+// ============================================================================
+// Deterministic Crowding (Mahfoud 1992): нишинг через локальную конкуренцию.
+//
+// Цель: удержать НЕСКОЛЬКО бассейнов притяжения в ОДНОЙ популяции, прямо борясь
+// с преждевременной сходимостью — диагностированным корнем плато на 96%.
+//
+// Принцип (одна генерация):
+//   1. Перемешать популяцию, разбить на случайные пары (p1, p2).
+//   2. HUX-кроссовер → c1, c2 (дети максимально разные).
+//   3. Лёгкая мутация (dc_mutation_fraction, ~1 бит).
+//   4. Сопоставление по близости: пара (ребёнок ↔ более похожий родитель)
+//      выбирается так, чтобы суммарное Hamming-расстояние было минимальным.
+//   5. Ребёнок ЗАМЕНЯЕТ своего родителя ТОЛЬКО если строго лучше (по diff).
+//
+// Почему это иначе, чем всё, что мы пробовали:
+//   - Нет переноса знания между циклами, нет привязки к глобальному best
+//     (именно анкоринг к best проваливал progressive/targeted/gene_fix/chc).
+//   - Замена локальна (ребёнок ↔ похожий родитель) → разные ниши не вытесняют
+//     друг друга, популяция исследует много оптимумов параллельно.
+//   - Элитизм неявный: особь заменяется только строго лучшей → глобальный best
+//     монотонно не ухудшается.
+//
+// Рестарты: на стагнации стартуем со свежей случайной популяции (как hybrid),
+// сохраняя глобальный best. Это даёт честное сравнение с baseline по бюджету.
+// ============================================================================
+fn solve_deterministic_crowding(
+    prices: &[i64],
+    target_sum: i64,
+    config: &GeneticAlgorithmConfig,
+    rng: &mut Rng64,
+) -> Result<GeneticAlgorithmResult, String> {
+    let n_genes = prices.len();
+    let pop_size = config.population_size;
+    let max_outer_restarts = config.hybrid_max_outer_restarts;
+    let max_generations = config.generations;
+    let stagnation_limit = config.stagnation;
+    let mutation_fraction = config.dc_mutation_fraction;
+
+    let mut total_generations = 0usize;
+    // Глобально лучшее. best_from_population возвращает (vector, sum, difference)!
+    let mut best_vec: Vec<u8> = Vec::new();
+    let mut best_sum = 0i64;
+    let mut best_diff = i64::MAX;
+    let mut stage_run_counts: Vec<usize> = Vec::new();
+    let mut stage_best_differences: Vec<i64> = Vec::new();
+    let mut exact_found = false;
+
+    for _restart in 0..=max_outer_restarts {
+        let mut population = build_initial_population(n_genes, pop_size, rng);
+        let mut evaluations = evaluate_population(&population, prices, target_sum);
+
+        // Инициализируем best из стартовой популяции, если ещё не задан.
+        {
+            let (v, s, d) = best_from_population(&population, &evaluations);
+            if d < best_diff {
+                best_vec = v;
+                best_sum = s;
+                best_diff = d;
+            }
+        }
+        if best_diff == 0 {
+            exact_found = true;
+            stage_run_counts.push(0);
+            stage_best_differences.push(0);
+            break;
+        }
+
+        let mut no_improvement = 0usize;
+        let mut restart_generations = 0usize;
+        let mut restart_best = best_diff;
+
+        while no_improvement < stagnation_limit && total_generations < max_generations {
+            let order = rng.sample_range(pop_size, pop_size);
+            for pair in order.chunks(2) {
+                if pair.len() < 2 {
+                    break;
+                }
+                let (ia, ib) = (pair[0], pair[1]);
+                let parent_a = population[ia].clone();
+                let parent_b = population[ib].clone();
+
+                let (c1, c2) = hux_crossover(&parent_a, &parent_b, rng);
+                let c1 = mutate_many_bits(&c1, mutation_fraction, rng);
+                let c2 = mutate_many_bits(&c2, mutation_fraction, rng);
+
+                let (d1, s1) = evaluate_vector(prices, target_sum, &c1);
+                let (d2, s2) = evaluate_vector(prices, target_sum, &c2);
+
+                let pa_diff = evaluations[ia].0;
+                let pb_diff = evaluations[ib].0;
+
+                // Сопоставление по минимальному суммарному расстоянию.
+                let dist_straight =
+                    hamming_distance(&c1, &parent_a) + hamming_distance(&c2, &parent_b);
+                let dist_cross =
+                    hamming_distance(&c1, &parent_b) + hamming_distance(&c2, &parent_a);
+
+                if dist_straight <= dist_cross {
+                    // c1 ↔ parent_a, c2 ↔ parent_b
+                    if d1 < pa_diff {
+                        population[ia] = c1;
+                        evaluations[ia] = (d1, s1);
+                    }
+                    if d2 < pb_diff {
+                        population[ib] = c2;
+                        evaluations[ib] = (d2, s2);
+                    }
+                } else {
+                    // c1 ↔ parent_b, c2 ↔ parent_a
+                    if d2 < pa_diff {
+                        population[ia] = c2;
+                        evaluations[ia] = (d2, s2);
+                    }
+                    if d1 < pb_diff {
+                        population[ib] = c1;
+                        evaluations[ib] = (d1, s1);
+                    }
+                }
+            }
+
+            total_generations += 1;
+            restart_generations += 1;
+
+            // Обновляем best этой эпохи и глобальный.
+            let (cur_vec, cur_sum, cur_diff) = best_from_population(&population, &evaluations);
+            if cur_diff < best_diff {
+                best_vec = cur_vec;
+                best_sum = cur_sum;
+                best_diff = cur_diff;
+            }
+            if cur_diff < restart_best {
+                restart_best = cur_diff;
+                no_improvement = 0;
+            } else {
+                no_improvement += 1;
+            }
+            if best_diff == 0 {
+                exact_found = true;
+                break;
+            }
+        }
+
+        stage_run_counts.push(restart_generations);
+        stage_best_differences.push(restart_best);
+        if exact_found || total_generations >= max_generations {
+            break;
+        }
+    }
+
+    let stop_reason = if exact_found {
+        "exact_match"
+    } else if total_generations >= max_generations {
+        "generation_limit"
+    } else {
+        "stagnation"
+    };
+    let run = SingleRunResult {
+        population: Vec::new(),
+        best_vector: best_vec,
+        best_sum,
+        difference: best_diff,
+        best_fitness: -best_diff,
+        generations_used: total_generations,
+        exact_match: exact_found,
+        stop_reason: stop_reason.to_string(),
+        nga_used: false,
+        nga_trigger_generation: None,
+        nga_trigger_generations: Vec::new(),
+    };
+    let final_stage = stage_run_counts.len();
+    Ok(build_result_with_stage_metadata(
+        run,
+        total_generations,
+        stop_reason,
+        stage_run_counts,
+        stage_best_differences,
+        final_stage,
+    ))
+}
+
 fn solve_two_stage_restart(
     prices: &[i64],
     target_sum: i64,
@@ -2645,6 +2937,18 @@ fn solve_with_genetic_algorithm(request: SolveRequest) -> Result<GeneticAlgorith
             &mut rng,
         ),
         "chc" => solve_chc(
+            &request.prices,
+            request.target_sum,
+            &request.config,
+            &mut rng,
+        ),
+        "deterministic_crowding" => solve_deterministic_crowding(
+            &request.prices,
+            request.target_sum,
+            &request.config,
+            &mut rng,
+        ),
+        "hybrid_portfolio" => solve_hybrid_portfolio(
             &request.prices,
             request.target_sum,
             &request.config,
